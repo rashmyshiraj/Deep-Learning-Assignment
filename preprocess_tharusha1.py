@@ -109,8 +109,253 @@ print(f"Missing values: {df['location'].isna().sum():,}")
 print(f"Number of unique values: {df['location'].nunique(dropna=False):,}")
 print("\nLocation value counts:")
 display(
-    df["location"]
+    df["location"
     .value_counts(dropna=False)
     .rename_axis("location")
     .reset_index(name="row_count")
 )
+
+
+# ------------------------------------------------------------
+# STEP 2: BASIC DATA PREPARATION
+# ------------------------------------------------------------
+
+# 1. Preserve an in-memory copy of the originally loaded dataset.
+#    This allows you to return to the raw version during this session.
+df_raw = df.copy()
+
+# 2. Record the row count before making changes.
+rows_before = len(df)
+
+# 3. Convert the confirmed date format from text to datetime.
+df["date"] = pd.to_datetime(
+    df["date"],
+    format="%m/%d/%Y",
+    errors="raise"
+)
+
+# 4. Sort explicitly by date to guarantee chronological order.
+df = df.sort_values(
+    by="date",
+    ascending=True
+).reset_index(drop=True)
+
+# 5. Drop location because it has one constant value: Colombo.
+df = df.drop(columns=["location"])
+
+# 6. Basic verification output.
+print("STEP 2: BASIC DATA PREPARATION COMPLETE")
+print("-" * 60)
+print(f"Rows before preprocessing: {rows_before:,}")
+print(f"Rows after preprocessing: {len(df):,}")
+print(f"Columns after preprocessing: {df.shape[1]:,}")
+print(f"Date data type: {df['date'].dtype}")
+print(f"Earliest date: {df['date'].min().date()}")
+print(f"Latest date: {df['date'].max().date()}")
+print(f"Chronological order: {df['date'].is_monotonic_increasing}")
+print(f"Duplicate dates: {df['date'].duplicated().sum():,}")
+print(f"'location' exists after dropping: {'location' in df.columns}")
+
+print("\nFirst three rows after preparation:")
+display(df.head(3))
+
+print("\nLast three rows after preparation:")
+display(df.tail(3))
+
+# Expected daily frequency: one row for each calendar day.
+date_gaps = df["date"].diff().dt.days
+missing_calendar_days = date_gaps[date_gaps > 1]
+
+print("DATE CONTINUITY CHECK")
+print("-" * 60)
+print(f"Expected daily records between first and last date: {(df['date'].max() - df['date'].min()).days + 1:,}")
+print(f"Actual rows: {len(df):,}")
+print(f"Number of gaps greater than one day: {len(missing_calendar_days):,}")
+
+if len(missing_calendar_days) > 0:
+    gap_rows = df.loc[missing_calendar_days.index, ["date"]].copy()
+    gap_rows["previous_date"] = df["date"].shift(1).loc[missing_calendar_days.index].values
+    gap_rows["gap_in_days"] = missing_calendar_days.values
+    print("\nDetected date gaps:")
+    display(gap_rows.head(20))
+else:
+    print("\nNo missing calendar dates were detected.")
+
+exchange_rate_columns = [
+    "usd_lkr",
+    "rub_lkr",
+    "inr_lkr",
+    "gbp_lkr",
+    "eur_lkr",
+    "cny_lkr"
+]
+
+exchange_missing_summary = pd.DataFrame({
+    "missing_count": df[exchange_rate_columns].isna().sum(),
+    "missing_percentage": (
+        df[exchange_rate_columns].isna().mean() * 100
+    ).round(2),
+    "first_available_date": df[exchange_rate_columns].apply(
+        lambda column: df.loc[column.notna(), "date"].min()
+    ),
+    "last_available_date": df[exchange_rate_columns].apply(
+        lambda column: df.loc[column.notna(), "date"].max()
+    ),
+    "first_missing_date": df[exchange_rate_columns].apply(
+        lambda column: df.loc[column.isna(), "date"].min()
+    ),
+    "last_missing_date": df[exchange_rate_columns].apply(
+        lambda column: df.loc[column.isna(), "date"].max()
+    )
+})
+display(exchange_missing_summary)
+
+# Create a row-level flag showing whether ALL six exchange-rate values are missing.
+df["all_exchange_rates_missing"] = df[exchange_rate_columns].isna().all(axis=1)
+
+# Display the first 15 records to inspect the initial missing values.
+print("FIRST 15 ROWS: EXCHANGE-RATE INSPECTION")
+display(
+    df[
+        ["date"] + exchange_rate_columns + ["all_exchange_rates_missing"]
+    ].head(15)
+)
+
+# Show how many rows have all six rates missing versus at least one observed rate.
+print("\nALL-EXCHANGE-RATES-MISSING COUNTS")
+display(
+    df["all_exchange_rates_missing"]
+    .value_counts(dropna=False)
+    .rename_axis("all_exchange_rates_missing")
+    .reset_index(name="row_count")
+)
+
+# Identify complete all-rate-missing blocks in chronological order.
+missing_block_id = (
+    df["all_exchange_rates_missing"]
+    .ne(df["all_exchange_rates_missing"].shift())
+    .cumsum()
+)
+all_missing_blocks = (
+    df.loc[df["all_exchange_rates_missing"]]
+    .groupby(missing_block_id[df["all_exchange_rates_missing"]])
+    .agg(
+        start_date=("date", "min"),
+        end_date=("date", "max"),
+        number_of_days=("date", "size")
+    )
+    .reset_index(drop=True)
+)
+
+print("\nALL-RATE MISSING BLOCK SUMMARY")
+display(all_missing_blocks)
+
+print("\nLongest all-rate missing blocks:")
+display(
+    all_missing_blocks
+    .sort_values("number_of_days", ascending=False)
+    .head(20)
+)
+
+# ------------------------------------------------------------
+# STEP 3.1: LEAKAGE-SAFE EXCHANGE-RATE IMPUTATION
+# ------------------------------------------------------------
+
+# Preserve the original missingness before replacing any values.
+# These flags can be kept as optional model features or audit columns.
+for column in exchange_rate_columns:
+    df[f"{column}_was_missing"] = df[column].isna().astype("int8")
+
+# Count missing values before imputation.
+exchange_missing_before = df[exchange_rate_columns].isna().sum()
+
+# Forward-fill only: each missing value receives the most recent
+# exchange rate available on an earlier date.
+# No backward fill and no two-sided interpolation are used.
+df[exchange_rate_columns] = df[exchange_rate_columns].ffill()
+
+# Count missing values after imputation.
+exchange_missing_after = df[exchange_rate_columns].isna().sum()
+
+# Create a clear verification table.
+exchange_imputation_check = pd.DataFrame({
+    "missing_before": exchange_missing_before,
+    "missing_after_forward_fill": exchange_missing_after,
+    "values_filled": exchange_missing_before - exchange_missing_after
+})
+
+print("EXCHANGE-RATE IMPUTATION RESULTS")
+print("-" * 70)
+display(exchange_imputation_check)
+
+print("\nRemaining missing exchange-rate cells by column:")
+print(exchange_missing_after[exchange_missing_after > 0])
+
+print("\nRows that still contain any missing exchange rate:")
+remaining_exchange_missing_rows = df.loc[
+    df[exchange_rate_columns].isna().any(axis=1),
+    ["date"] + exchange_rate_columns
+]
+display(remaining_exchange_missing_rows)
+
+print("\nExchange-rate values around the start of the series:")
+display(
+    df[
+        ["date"] + exchange_rate_columns +
+        [f"{column}_was_missing" for column in exchange_rate_columns]
+    ].head(6)
+)
+
+print("\nExchange-rate values around the 2025-09 long missing block:")
+display(
+    df.loc[
+        (df["date"] >= "2025-09-06") &
+        (df["date"] <= "2025-09-21"),
+        ["date"] + exchange_rate_columns +
+        [f"{column}_was_missing" for column in exchange_rate_columns]
+    ]
+)
+
+# ------------------------------------------------------------
+# STEP 3.1: MARK START-OF-SERIES EXCHANGE-RATE INCOMPLETENESS
+# ------------------------------------------------------------
+
+# Flag rows where one or more exchange-rate values remain unavailable
+# even after past-only forward-fill.
+df["exchange_rates_complete"] = (
+    df[exchange_rate_columns]
+    .notna()
+    .all(axis=1)
+    .astype("int8")
+)
+
+# Create the inverse flag for easier inspection.
+df["exchange_rates_incomplete"] = (
+    1 - df["exchange_rates_complete"]
+).astype("int8")
+
+print("EXCHANGE-RATE COMPLETENESS CHECK")
+print("-" * 70)
+
+print("\nCompleteness counts:")
+display(
+    df["exchange_rates_complete"]
+    .value_counts()
+    .sort_index()
+    .rename_axis("exchange_rates_complete")
+    .reset_index(name="row_count")
+)
+
+print("\nRows with incomplete exchange-rate data after forward-fill:")
+display(
+    df.loc[
+        df["exchange_rates_incomplete"] == 1,
+        ["date"] + exchange_rate_columns +
+        ["exchange_rates_complete", "exchange_rates_incomplete"]
+    ]
+)
+
+print("\nFinal exchange-rate missing-value count:")
+display(df[exchange_rate_columns].isna().sum().to_frame("remaining_missing_count"))
+
+
