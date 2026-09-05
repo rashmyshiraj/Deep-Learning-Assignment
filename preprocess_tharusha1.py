@@ -359,3 +359,183 @@ print("\nFinal exchange-rate missing-value count:")
 display(df[exchange_rate_columns].isna().sum().to_frame("remaining_missing_count"))
 
 
+# ------------------------------------------------------------
+# STEP 3.2: INSPECT GDP AND INFLATION MISSINGNESS
+# ------------------------------------------------------------
+
+macro_columns = [
+    "gdp_per_capita",
+    "inflation_rate"
+]
+
+# Summary of the real missingness pattern.
+macro_missing_summary = pd.DataFrame({
+    "missing_count": df[macro_columns].isna().sum(),
+    "missing_percentage": (
+        df[macro_columns].isna().mean() * 100
+    ).round(2),
+    "first_available_date": df[macro_columns].apply(
+        lambda column: df.loc[column.notna(), "date"].min()
+    ),
+    "last_available_date": df[macro_columns].apply(
+        lambda column: df.loc[column.notna(), "date"].max()
+    ),
+    "first_missing_date": df[macro_columns].apply(
+        lambda column: df.loc[column.isna(), "date"].min()
+    ),
+    "last_missing_date": df[macro_columns].apply(
+        lambda column: df.loc[column.isna(), "date"].max()
+    )
+})
+
+print("GDP AND INFLATION MISSINGNESS SUMMARY")
+print("-" * 70)
+display(macro_missing_summary)
+
+# Check whether both fields are missing on exactly the same dates.
+same_missing_dates = (
+    df["gdp_per_capita"].isna()
+    == df["inflation_rate"].isna()
+).all()
+
+print(f"\nGDP and inflation missing on exactly the same dates: {same_missing_dates}")
+
+# Identify continuous time blocks where both macroeconomic columns are missing.
+both_macro_missing = df[macro_columns].isna().all(axis=1)
+
+macro_block_id = (
+    both_macro_missing
+    .ne(both_macro_missing.shift())
+    .cumsum()
+)
+
+macro_missing_blocks = (
+    df.loc[both_macro_missing]
+    .groupby(macro_block_id[both_macro_missing])
+    .agg(
+        start_date=("date", "min"),
+        end_date=("date", "max"),
+        number_of_days=("date", "size")
+    )
+    .reset_index(drop=True)
+)
+
+print("\nMISSING BLOCKS WHERE BOTH GDP AND INFLATION ARE MISSING")
+display(macro_missing_blocks)
+
+print("\nLongest missing blocks:")
+display(
+    macro_missing_blocks
+    .sort_values("number_of_days", ascending=False)
+    .head(20)
+)
+
+print("\nRows around the first macroeconomic missing date:")
+first_macro_missing_date = df.loc[both_macro_missing, "date"].min()
+display(
+    df.loc[
+        (df["date"] >= first_macro_missing_date - pd.Timedelta(days=5)) &
+        (df["date"] <= first_macro_missing_date + pd.Timedelta(days=10)),
+        ["date"] + macro_columns
+    ]
+)
+
+# ------------------------------------------------------------
+# STEP 3.2: LEAKAGE-SAFE MACROECONOMIC IMPUTATION
+# ------------------------------------------------------------
+
+# Preserve the original missingness before filling values.
+for column in macro_columns:
+    df[f"{column}_was_missing"] = df[column].isna().astype("int8")
+
+# Record missing counts before filling.
+macro_missing_before = df[macro_columns].isna().sum()
+
+# Use only previously available values.
+# This fills the 2026 trailing block with values known on 2025-12-31.
+df[macro_columns] = df[macro_columns].ffill()
+
+# Record missing counts after filling.
+macro_missing_after = df[macro_columns].isna().sum()
+
+# Display imputation results.
+macro_imputation_check = pd.DataFrame({
+    "missing_before": macro_missing_before,
+    "missing_after_forward_fill": macro_missing_after,
+    "values_filled": macro_missing_before - macro_missing_after
+})
+
+print("MACROECONOMIC IMPUTATION RESULTS")
+print("-" * 70)
+display(macro_imputation_check)
+
+print("\nVerification around the 2025–2026 transition:")
+display(
+    df.loc[
+        (df["date"] >= "2025-12-28") &
+        (df["date"] <= "2026-01-05"),
+        [
+            "date",
+            "gdp_per_capita",
+            "inflation_rate",
+            "gdp_per_capita_was_missing",
+            "inflation_rate_was_missing"
+        ]
+    ]
+)
+
+print("\nRemaining missing values in macroeconomic columns:")
+display(
+    df[macro_columns]
+    .isna()
+    .sum()
+    .to_frame("remaining_missing_count")
+)
+
+# ------------------------------------------------------------
+# STEP 3.3: WEATHER DATA QUALITY CHECK
+# ------------------------------------------------------------
+
+weather_columns = [
+    "temperature",
+    "precipitation",
+    "humidity",
+    "wind_speed"
+]
+
+weather_quality_summary = pd.DataFrame({
+    "missing_count": df[weather_columns].isna().sum(),
+    "missing_percentage": (
+        df[weather_columns].isna().mean() * 100
+    ).round(2),
+    "minimum": df[weather_columns].min(),
+    "maximum": df[weather_columns].max(),
+    "mean": df[weather_columns].mean().round(2),
+    "median": df[weather_columns].median().round(2),
+    "negative_value_count": (
+        df[weather_columns] < 0
+    ).sum()
+})
+
+print("WEATHER DATA QUALITY SUMMARY")
+print("-" * 70)
+display(weather_quality_summary)
+
+print("\nWeather rows containing missing values:")
+weather_missing_rows = df.loc[
+    df[weather_columns].isna().any(axis=1),
+    ["date"] + weather_columns
+]
+display(weather_missing_rows)
+
+print("\nFirst five weather observations:")
+display(df[["date"] + weather_columns].head())
+
+print("\nLast five weather observations:")
+display(df[["date"] + weather_columns].tail())
+
+# ------------------------------------------------------------
+# Save Person 1 output for Person 2
+step3_path = "/content/step_3_missing_values_preprocessed.csv"
+df.to_csv(step3_path, index=False, date_format="%Y-%m-%d")
+print(f"Saved Person 1 output: {step3_path}")
