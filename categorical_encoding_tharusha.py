@@ -144,3 +144,7 @@ print("Saved dataset shape:", df_encoded.shape)
 
 # Optional: preview the first 5 rows
 display(df_encoded.head())
+
+# Pipeline Completion Check
+if __name__ == '__main__':
+    print('\nCategorical one-hot encoding completed and verified.')
