@@ -233,3 +233,241 @@ print("\n" + "=" * 80)
 print("VERIFICATION COMPLETE")
 print("=" * 80)
 print("No data was modified.")
+
+
+# ============================================================
+# FEATURE CLASSIFICATION AND LEAKAGE CHECKS
+# ============================================================
+df["date"] = pd.to_datetime(df["date"])
+
+target_column = "arrivals"
+
+historical_features = [
+    "brent_crude_price",
+    "cny_lkr",
+    "eur_lkr",
+    "gbp_lkr",
+    "inr_lkr",
+    "rub_lkr",
+    "usd_lkr",
+    "gdp_per_capita",
+    "inflation_rate",
+    "temperature",
+    "humidity",
+    "precipitation",
+    "wind_speed",
+    "is_rainy_day",
+    "image_search",
+    "web_search",
+    "youtube_search",
+    "exchange_rates_complete",
+    "cny_lkr_was_missing",
+    "eur_lkr_was_missing",
+    "gbp_lkr_was_missing",
+    "inr_lkr_was_missing",
+    "rub_lkr_was_missing",
+    "usd_lkr_was_missing",
+    "gdp_per_capita_was_missing",
+    "inflation_rate_was_missing"
+]
+
+known_future_features = [
+    "year",
+    "month",
+    "day_of_month",
+    "day_of_week",
+    "is_weekend",
+    "month_sin",
+    "month_cos",
+    "day_of_week_sin",
+    "day_of_week_cos",
+    "days_since_last_holiday",
+    "days_since_last_holiday_was_missing",
+    "days_to_next_holiday_was_missing",
+    "in_holiday_window",
+    "is_holiday",
+    "is_tourist_event"
+]
+
+holiday_features = [
+    column for column in df.columns
+    if column.startswith("holiday_name_grouped_")
+]
+
+event_features = [
+    column for column in df.columns
+    if column.startswith("event_name_grouped_")
+]
+
+all_classified_features = (
+    historical_features
+    + known_future_features
+    + holiday_features
+    + event_features
+)
+
+unclassified_features = [
+    column for column in df.columns
+    if column not in ["date", target_column]
+    and column not in all_classified_features
+]
+
+print("=" * 90)
+print("1. TARGET")
+print("=" * 90)
+print(f"Target column: {target_column}")
+print(f"Target data type: {df[target_column].dtype}")
+print(f"Target minimum: {df[target_column].min()}")
+print(f"Target maximum: {df[target_column].max()}")
+
+print("\n" + "=" * 90)
+print("2. HISTORICAL / OBSERVED FEATURES")
+print("=" * 90)
+for column in historical_features:
+    print(f"{column} | dtype={df[column].dtype} | unique_values={df[column].nunique()}")
+
+print("\n" + "=" * 90)
+print("3. KNOWN-FUTURE CALENDAR / HOLIDAY FEATURES")
+print("=" * 90)
+
+known_future_display = [
+    column for column in known_future_features
+    if column in df.columns
+]
+
+for column in known_future_display:
+    print(f"{column} | dtype={df[column].dtype} | unique_values={df[column].nunique()}")
+
+print("\n" + "=" * 90)
+print("4. HOLIDAY ONE-HOT FEATURES")
+print("=" * 90)
+print(f"Number of holiday features: {len(holiday_features)}")
+for column in holiday_features:
+    print(f"{column} | unique_values={df[column].nunique()}")
+
+print("\n" + "=" * 90)
+print("5. EVENT ONE-HOT FEATURES")
+print("=" * 90)
+print(f"Number of event features: {len(event_features)}")
+for column in event_features:
+    print(f"{column} | unique_values={df[column].nunique()}")
+
+print("\n" + "=" * 90)
+print("6. UNCLASSIFIED FEATURES")
+print("=" * 90)
+
+if unclassified_features:
+    for column in unclassified_features:
+        print(f"{column} | dtype={df[column].dtype} | unique_values={df[column].nunique()}")
+else:
+    print("No unclassified features found.")
+
+print("\n" + "=" * 90)
+print("7. POTENTIAL LEAKAGE KEYWORD CHECK")
+print("=" * 90)
+
+leakage_keywords = [
+    "target",
+    "arrival",
+    "actual",
+    "future",
+    "forecast",
+    "predicted",
+    "prediction",
+    "next",
+    "lead",
+    "rolling",
+    "moving",
+    "lag",
+    "label"
+]
+
+leakage_candidates = []
+
+for column in df.columns:
+    column_lower = column.lower()
+
+    matched_keywords = [
+        keyword for keyword in leakage_keywords
+        if keyword in column_lower
+    ]
+
+    if matched_keywords:
+        leakage_candidates.append({
+            "column": column,
+            "matched_keywords": matched_keywords,
+            "dtype": str(df[column].dtype),
+            "unique_values": df[column].nunique()
+        })
+
+if leakage_candidates:
+    leakage_table = pd.DataFrame(leakage_candidates)
+    print(leakage_table.to_string(index=False))
+else:
+    print("No columns matched the leakage keyword check.")
+
+print("\n" + "=" * 90)
+print("8. CONSTANT FEATURES")
+print("=" * 90)
+
+constant_features = [
+    column for column in df.columns
+    if df[column].nunique(dropna=False) <= 1
+]
+
+if constant_features:
+    for column in constant_features:
+        print(
+            f"{column} | value={df[column].iloc[0]} | "
+            f"dtype={df[column].dtype}"
+        )
+else:
+    print("No constant features found.")
+
+print("\n" + "=" * 90)
+print("9. FEATURE VALUE AVAILABILITY SUMMARY")
+print("=" * 90)
+
+feature_summary = []
+
+for column in df.columns:
+    if column == "date":
+        category = "Date"
+    elif column == target_column:
+        category = "Target"
+    elif column in historical_features:
+        category = "Historical / observed"
+    elif column in known_future_features:
+        category = "Known future candidate"
+    elif column in holiday_features:
+        category = "Known future holiday candidate"
+    elif column in event_features:
+        category = "Known future event candidate"
+    else:
+        category = "Unclassified"
+
+    feature_summary.append({
+        "column": column,
+        "category": category,
+        "dtype": str(df[column].dtype),
+        "unique_values": df[column].nunique(),
+        "missing_values": df[column].isna().sum()
+    })
+
+feature_summary_df = pd.DataFrame(feature_summary)
+
+print(
+    feature_summary_df["category"]
+    .value_counts()
+    .to_string()
+)
+
+print("\n" + "=" * 90)
+print("10. FULL FEATURE CLASSIFICATION TABLE")
+print("=" * 90)
+print(feature_summary_df.to_string(index=False))
+
+print("\n" + "=" * 90)
+print("CLASSIFICATION COMPLETE")
+print("=" * 90)
+print("No columns were removed or modified.")
