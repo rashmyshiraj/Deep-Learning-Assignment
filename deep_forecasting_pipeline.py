@@ -567,3 +567,119 @@ print(df_final.shape)
 output_filename = "Sri_Lanka_Tourism_Modeling_Features.csv"
 df_final.to_csv(output_filename, index=False)
 print(f"\nSaved modeling dataframe to: {output_filename}")
+
+
+# ============================================================
+# CHRONOLOGICAL SPLITTING AND SCALING
+# ============================================================
+from sklearn.preprocessing import StandardScaler
+
+df_final["date"] = pd.to_datetime(df_final["date"])
+df_final = df_final.sort_values("date").reset_index(drop=True)
+
+train_end_date = pd.Timestamp("2023-12-31")
+val_end_date = pd.Timestamp("2024-12-31")
+test_start_date = pd.Timestamp("2025-01-01")
+
+train_mask = df_final["date"] <= train_end_date
+val_mask = (df_final["date"] > train_end_date) & (df_final["date"] <= val_end_date)
+test_mask = df_final["date"] >= test_start_date
+
+train_df = df_final[train_mask].reset_index(drop=True)
+val_df = df_final[val_mask].reset_index(drop=True)
+test_df = df_final[test_mask].reset_index(drop=True)
+
+features_to_scale = [
+    "brent_crude_price",
+    "cny_lkr",
+    "eur_lkr",
+    "gbp_lkr",
+    "inr_lkr",
+    "rub_lkr",
+    "usd_lkr",
+    "gdp_per_capita",
+    "inflation_rate",
+    "temperature",
+    "humidity",
+    "precipitation",
+    "wind_speed",
+    "image_search",
+    "web_search",
+    "youtube_search",
+    "month_sin",
+    "month_cos",
+    "day_of_week_sin",
+    "day_of_week_cos",
+    "days_since_last_holiday"
+]
+
+feature_columns = [
+    c for c in df_final.columns
+    if c not in ["date", target_column]
+]
+
+scaler = StandardScaler()
+scaler.fit(train_df[features_to_scale])
+
+train_scaled_values = scaler.transform(train_df[features_to_scale])
+val_scaled_values = scaler.transform(val_df[features_to_scale])
+test_scaled_values = scaler.transform(test_df[features_to_scale])
+
+train_scaled_features = pd.DataFrame(
+    train_scaled_values,
+    columns=features_to_scale,
+    index=train_df.index
+)
+
+val_scaled_features = pd.DataFrame(
+    val_scaled_values,
+    columns=features_to_scale,
+    index=val_df.index
+)
+
+test_scaled_features = pd.DataFrame(
+    test_scaled_values,
+    columns=features_to_scale,
+    index=test_df.index
+)
+
+unscaled_features = [
+    c for c in feature_columns
+    if c not in features_to_scale
+]
+
+train_full = pd.concat(
+    [
+        train_df[["date"]],
+        train_scaled_features,
+        train_df[unscaled_features],
+        train_df[[target_column]]
+    ],
+    axis=1
+)
+
+val_full = pd.concat(
+    [
+        val_df[["date"]],
+        val_scaled_features,
+        val_df[unscaled_features],
+        val_df[[target_column]]
+    ],
+    axis=1
+)
+
+test_full = pd.concat(
+    [
+        test_df[["date"]],
+        test_scaled_features,
+        test_df[unscaled_features],
+        test_df[[target_column]]
+    ],
+    axis=1
+)
+
+train_full.to_csv("train_scaled.csv", index=False)
+val_full.to_csv("val_scaled.csv", index=False)
+test_full.to_csv("test_scaled.csv", index=False)
+
+print("Chronological split and scaling complete.")
