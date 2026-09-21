@@ -2150,3 +2150,1307 @@ history_tcn_B = model_tcn_B.fit(
 # %%
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import numpy as np
+
+# ============================================================
+# EXPERIMENT B — TCN TEST EVALUATION
+# ============================================================
+
+y_pred_scaled_tcn_B = model_tcn_B.predict(
+    X_test_scaled_B,
+    verbose=1
+)
+
+# Inverse transform
+y_pred_tcn_B = target_scaler_B_corrected.inverse_transform(
+    y_pred_scaled_tcn_B.reshape(-1, 1)
+).reshape(y_pred_scaled_tcn_B.shape)
+
+
+y_true = y_test_B.astype(float)
+y_pred = y_pred_tcn_B.astype(float)
+
+
+# ------------------------------------------------------------
+# Metrics
+# ------------------------------------------------------------
+
+mae = mean_absolute_error(
+    y_true.flatten(),
+    y_pred.flatten()
+)
+
+rmse = np.sqrt(
+    mean_squared_error(
+        y_true.flatten(),
+        y_pred.flatten()
+    )
+)
+
+smape = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+
+# ------------------------------------------------------------
+# Correct 7-day MASE denominator
+# ------------------------------------------------------------
+
+seasonal_errors = []
+
+for block_id, block in df_weekly.groupby("block_id", sort=True):
+
+    block = block.sort_values("date")
+
+    block = block[
+        block["date"] <= pd.Timestamp("2023-12-31")
+    ]
+
+    arrivals = block[TARGET].values.astype(float)
+
+    if len(arrivals) > 7:
+        seasonal_errors.extend(
+            np.abs(arrivals[7:] - arrivals[:-7])
+        )
+
+mase_denominator = np.mean(seasonal_errors)
+
+mase = np.mean(
+    np.abs(y_true - y_pred)
+) / mase_denominator
+
+
+# ------------------------------------------------------------
+# Horizon MAE
+# ------------------------------------------------------------
+
+horizons = [0, 6, 13, 20, 29]
+
+horizon_mae = {}
+
+for h in horizons:
+    horizon_mae[h + 1] = mean_absolute_error(
+        y_true[:, h],
+        y_pred[:, h]
+    )
+
+
+# ------------------------------------------------------------
+# Distribution
+# ------------------------------------------------------------
+
+actual_mean = np.mean(y_true)
+pred_mean = np.mean(y_pred)
+
+actual_std = np.std(y_true)
+pred_std = np.std(y_pred)
+
+actual_min = np.min(y_true)
+actual_max = np.max(y_true)
+
+pred_min = np.min(y_pred)
+pred_max = np.max(y_pred)
+
+
+# ============================================================
+# RESULTS
+# ============================================================
+
+print("\n" + "=" * 60)
+print("EXPERIMENT B — TCN TEST RESULTS")
+print("=" * 60)
+
+print(f"\nMAE:    {mae:.2f}")
+print(f"RMSE:   {rmse:.2f}")
+print(f"sMAPE:  {smape:.2f}%")
+print(f"MASE:   {mase:.4f}")
+
+print(f"\nMASE denominator: {mase_denominator:.4f}")
+
+print("\nHorizon MAE:")
+
+for h, value in horizon_mae.items():
+    print(f"  Day +{h:2d}: {value:.2f}")
+
+print("\nForecast distribution:")
+
+print(f"  Actual mean: {actual_mean:.2f}")
+print(f"  Pred mean:   {pred_mean:.2f}")
+
+print(f"\n  Actual std: {actual_std:.2f}")
+print(f"  Pred std:   {pred_std:.2f}")
+
+print(f"\n  Actual range: {actual_min:.0f} → {actual_max:.0f}")
+print(f"  Pred range:   {pred_min:.0f} → {pred_max:.0f}")
+
+print("\nFirst 30-day forecast:")
+
+print("Actual:")
+print(y_true[0].astype(int))
+
+print("\nPredicted:")
+print(np.round(y_pred[0]).astype(int))
+
+print("\n" + "=" * 60)
+
+
+# %%
+import tensorflow as tf
+from tensorflow.keras import Model
+from tensorflow.keras.layers import (
+    Input,
+    Dense,
+    Dropout,
+    LayerNormalization,
+    MultiHeadAttention,
+    GlobalAveragePooling1D,
+    Embedding
+)
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.keras.utils.set_random_seed(42)
+
+# ============================================================
+# EXPERIMENT B — TRANSFORMER ENCODER
+# ============================================================
+
+class PositionalEmbedding(tf.keras.layers.Layer):
+
+    def __init__(self, sequence_length, d_model):
+        super().__init__()
+
+        self.position_embedding = Embedding(
+            input_dim=sequence_length,
+            output_dim=d_model
+        )
+
+    def call(self, inputs):
+
+        length = tf.shape(inputs)[1]
+
+        positions = tf.range(
+            start=0,
+            limit=length,
+            delta=1
+        )
+
+        position_embeddings = self.position_embedding(
+            positions
+        )
+
+        return inputs + position_embeddings
+
+
+def transformer_encoder(
+    inputs,
+    d_model=64,
+    num_heads=4,
+    ff_dim=128,
+    dropout_rate=0.20
+):
+
+    # Multi-head self-attention
+    attention_output = MultiHeadAttention(
+        num_heads=num_heads,
+        key_dim=d_model // num_heads,
+        dropout=dropout_rate
+    )(
+        inputs,
+        inputs
+    )
+
+    attention_output = Dropout(
+        dropout_rate
+    )(attention_output)
+
+    # Residual + normalization
+    x = LayerNormalization(
+        epsilon=1e-6
+    )(inputs + attention_output)
+
+    # Feed-forward network
+    ff_output = Dense(
+        ff_dim,
+        activation="relu"
+    )(x)
+
+    ff_output = Dropout(
+        dropout_rate
+    )(ff_output)
+
+    ff_output = Dense(
+        d_model
+    )(ff_output)
+
+    ff_output = Dropout(
+        dropout_rate
+    )(ff_output)
+
+    # Residual + normalization
+    return LayerNormalization(
+        epsilon=1e-6
+    )(x + ff_output)
+
+
+# ------------------------------------------------------------
+# Model
+# ------------------------------------------------------------
+
+inputs = Input(
+    shape=(LOOKBACK, X_train_scaled_B.shape[-1])
+)
+
+# Project 114 input features → 64-dimensional representation
+x = Dense(64)(inputs)
+
+# Add learned positional information
+x = PositionalEmbedding(
+    sequence_length=LOOKBACK,
+    d_model=64
+)(x)
+
+
+# Two Transformer encoder blocks
+x = transformer_encoder(
+    x,
+    d_model=64,
+    num_heads=4,
+    ff_dim=128,
+    dropout_rate=0.20
+)
+
+x = transformer_encoder(
+    x,
+    d_model=64,
+    num_heads=4,
+    ff_dim=128,
+    dropout_rate=0.20
+)
+
+
+# Aggregate the 90 time steps
+x = GlobalAveragePooling1D()(x)
+
+# Forecast head
+x = Dense(
+    64,
+    activation="relu"
+)(x)
+
+x = Dropout(0.20)(x)
+
+outputs = Dense(
+    HORIZON
+)(x)
+
+
+model_transformer_B = Model(
+    inputs=inputs,
+    outputs=outputs
+)
+
+
+model_transformer_B.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.001
+    ),
+    loss="mse"
+)
+
+
+model_transformer_B.summary()
+
+
+# ------------------------------------------------------------
+# Training
+# ------------------------------------------------------------
+
+early_stopping_transformer = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True,
+    verbose=1
+)
+
+
+history_transformer_B = model_transformer_B.fit(
+    X_train_scaled_B,
+    y_train_scaled_B,
+    validation_data=(
+        X_val_scaled_B,
+        y_val_scaled_B
+    ),
+    epochs=100,
+    batch_size=32,
+    callbacks=[early_stopping_transformer],
+    verbose=1
+)
+
+# %%
+import numpy as np
+
+# ============================================================
+# EXPERIMENT B — TRANSFORMER TEST EVALUATION
+# ============================================================
+
+# Predict on the test set
+y_pred_transformer_scaled = model_transformer_B.predict(
+    X_test_scaled_B,
+    verbose=1
+)
+
+# Convert predictions and actual values back to original scale
+y_pred_transformer = target_scaler_B.inverse_transform(
+    y_pred_transformer_scaled.reshape(-1, 1)
+).reshape(y_pred_transformer_scaled.shape)
+
+y_test_actual = target_scaler_B.inverse_transform(
+    y_test_scaled_B.reshape(-1, 1)
+).reshape(y_test_scaled_B.shape)
+
+
+# ------------------------------------------------------------
+# Metrics
+# ------------------------------------------------------------
+
+# MAE
+mae_transformer = np.mean(
+    np.abs(y_test_actual - y_pred_transformer)
+)
+
+# RMSE
+rmse_transformer = np.sqrt(
+    np.mean(
+        (y_test_actual - y_pred_transformer) ** 2
+    )
+)
+
+# sMAPE
+smape_transformer = np.mean(
+    2 * np.abs(y_test_actual - y_pred_transformer) /
+    (
+        np.abs(y_test_actual) +
+        np.abs(y_pred_transformer) +
+        1e-8
+    )
+) * 100
+
+
+# 7-day seasonal naive MASE
+mase_transformer = (
+    mae_transformer /
+    mase_denominator
+)
+
+
+# ------------------------------------------------------------
+# Print results
+# ------------------------------------------------------------
+
+print("\n" + "=" * 60)
+print("TRANSFORMER — TEST RESULTS")
+print("=" * 60)
+
+print(f"MAE:       {mae_transformer:.2f}")
+print(f"RMSE:      {rmse_transformer:.2f}")
+print(f"sMAPE:     {smape_transformer:.2f}%")
+print(f"7-day MASE: {mase_transformer:.4f}")
+
+print(f"\nMASE denominator: {mase_denominator:.4f}")
+
+
+# ------------------------------------------------------------
+# Horizon-specific MAE
+# ------------------------------------------------------------
+
+horizons = [1, 7, 14, 21, 30]
+
+print("\nHorizon-specific MAE:")
+
+for day in horizons:
+    horizon_mae = np.mean(
+        np.abs(
+            y_test_actual[:, day - 1] -
+            y_pred_transformer[:, day - 1]
+        )
+    )
+
+    print(
+        f"Day +{day:02d}: "
+        f"{horizon_mae:.2f}"
+    )
+
+
+# ------------------------------------------------------------
+# Prediction distribution
+# ------------------------------------------------------------
+
+print("\nPrediction distribution:")
+
+print(
+    f"Actual mean: "
+    f"{np.mean(y_test_actual):.2f}"
+)
+
+print(
+    f"Predicted mean: "
+    f"{np.mean(y_pred_transformer):.2f}"
+)
+
+print(
+    f"Actual std: "
+    f"{np.std(y_test_actual):.2f}"
+)
+
+print(
+    f"Predicted std: "
+    f"{np.std(y_pred_transformer):.2f}"
+)
+
+print(
+    f"Actual range: "
+    f"{np.min(y_test_actual):.0f} → "
+    f"{np.max(y_test_actual):.0f}"
+)
+
+print(
+    f"Predicted range: "
+    f"{np.min(y_pred_transformer):.0f} → "
+    f"{np.max(y_pred_transformer):.0f}"
+)
+
+
+# ------------------------------------------------------------
+# First 30-day forecast example
+# ------------------------------------------------------------
+
+print("\nFirst test sample — actual:")
+print(
+    np.round(
+        y_test_actual[0]
+    ).astype(int)
+)
+
+print("\nFirst test sample — Transformer prediction:")
+print(
+    np.round(
+        y_pred_transformer[0]
+    ).astype(int)
+)
+
+# %%
+import tensorflow as tf
+from tensorflow.keras import Model
+from tensorflow.keras.layers import (
+    Input,
+    Dense,
+    Dropout,
+    Add
+)
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.keras.utils.set_random_seed(42)
+
+# ============================================================
+# EXPERIMENT B — N-BEATS-STYLE MODEL
+# ============================================================
+
+def nbeats_block(
+    x,
+    hidden_units=128,
+    forecast_size=30,
+    dropout_rate=0.20
+):
+
+    # Fully connected block
+    h = Dense(
+        hidden_units,
+        activation="relu"
+    )(x)
+
+    h = Dropout(
+        dropout_rate
+    )(h)
+
+    h = Dense(
+        hidden_units,
+        activation="relu"
+    )(h)
+
+    h = Dropout(
+        dropout_rate
+    )(h)
+
+    h = Dense(
+        hidden_units,
+        activation="relu"
+    )(h)
+
+    h = Dropout(
+        dropout_rate
+    )(h)
+
+    # Backcast branch
+    backcast = Dense(
+        90,
+        activation="linear"
+    )(h)
+
+    # Forecast branch
+    forecast = Dense(
+        forecast_size,
+        activation="linear"
+    )(h)
+
+    return backcast, forecast
+
+
+# ------------------------------------------------------------
+# Input
+# ------------------------------------------------------------
+
+inputs = Input(
+    shape=(LOOKBACK, X_train_scaled_B.shape[-1])
+)
+
+# Flatten the complete 90-day × 114-feature history
+x = tf.keras.layers.Flatten()(inputs)
+
+
+# ------------------------------------------------------------
+# Initial representation
+# ------------------------------------------------------------
+
+x = Dense(
+    128,
+    activation="relu"
+)(x)
+
+x = Dropout(
+    0.20
+)(x)
+
+
+# ------------------------------------------------------------
+# N-BEATS-style blocks
+# ------------------------------------------------------------
+
+backcast1, forecast1 = nbeats_block(
+    x,
+    hidden_units=128,
+    forecast_size=HORIZON,
+    dropout_rate=0.20
+)
+
+# First residual connection
+x2 = Add()([
+    x,
+    Dense(128)(backcast1)
+])
+
+
+backcast2, forecast2 = nbeats_block(
+    x2,
+    hidden_units=128,
+    forecast_size=HORIZON,
+    dropout_rate=0.20
+)
+
+x3 = Add()([
+    x2,
+    Dense(128)(backcast2)
+])
+
+
+backcast3, forecast3 = nbeats_block(
+    x3,
+    hidden_units=128,
+    forecast_size=HORIZON,
+    dropout_rate=0.20
+)
+
+
+# ------------------------------------------------------------
+# Combine forecasts from all blocks
+# ------------------------------------------------------------
+
+outputs = Add()([
+    forecast1,
+    forecast2,
+    forecast3
+])
+
+
+# ------------------------------------------------------------
+# Build model
+# ------------------------------------------------------------
+
+model_nbeats_B = Model(
+    inputs=inputs,
+    outputs=outputs
+)
+
+
+model_nbeats_B.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.001
+    ),
+    loss="mse"
+)
+
+
+model_nbeats_B.summary()
+
+
+# ------------------------------------------------------------
+# Training
+# ------------------------------------------------------------
+
+early_stopping_nbeats = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True,
+    verbose=1
+)
+
+
+history_nbeats_B = model_nbeats_B.fit(
+    X_train_scaled_B,
+    y_train_scaled_B,
+    validation_data=(
+        X_val_scaled_B,
+        y_val_scaled_B
+    ),
+    epochs=100,
+    batch_size=32,
+    callbacks=[early_stopping_nbeats],
+    verbose=1
+)
+
+# %%
+import numpy as np
+
+# ============================================================
+# EXPERIMENT B — N-BEATS-STYLE TEST EVALUATION
+# ============================================================
+
+# Predict on the test set
+y_pred_nbeats_scaled = model_nbeats_B.predict(
+    X_test_scaled_B,
+    verbose=1
+)
+
+# Convert predictions back to original arrivals scale
+y_pred_nbeats = target_scaler_B.inverse_transform(
+    y_pred_nbeats_scaled.reshape(-1, 1)
+).reshape(y_pred_nbeats_scaled.shape)
+
+# Actual values in original scale
+y_test_actual = target_scaler_B.inverse_transform(
+    y_test_scaled_B.reshape(-1, 1)
+).reshape(y_test_scaled_B.shape)
+
+
+# ------------------------------------------------------------
+# Metrics
+# ------------------------------------------------------------
+
+# MAE
+mae_nbeats = np.mean(
+    np.abs(
+        y_test_actual - y_pred_nbeats
+    )
+)
+
+# RMSE
+rmse_nbeats = np.sqrt(
+    np.mean(
+        (y_test_actual - y_pred_nbeats) ** 2
+    )
+)
+
+# sMAPE
+smape_nbeats = np.mean(
+    2 * np.abs(
+        y_test_actual - y_pred_nbeats
+    ) /
+    (
+        np.abs(y_test_actual) +
+        np.abs(y_pred_nbeats) +
+        1e-8
+    )
+) * 100
+
+# 7-day seasonal-naive MASE
+mase_nbeats = (
+    mae_nbeats /
+    mase_denominator
+)
+
+
+# ------------------------------------------------------------
+# Print results
+# ------------------------------------------------------------
+
+print("\n" + "=" * 60)
+print("N-BEATS-STYLE — TEST RESULTS")
+print("=" * 60)
+
+print(f"MAE:       {mae_nbeats:.2f}")
+print(f"RMSE:      {rmse_nbeats:.2f}")
+print(f"sMAPE:     {smape_nbeats:.2f}%")
+print(f"7-day MASE: {mase_nbeats:.4f}")
+
+print(f"\nMASE denominator: {mase_denominator:.4f}")
+
+
+# ------------------------------------------------------------
+# Horizon-specific MAE
+# ------------------------------------------------------------
+
+horizons = [1, 7, 14, 21, 30]
+
+print("\nHorizon-specific MAE:")
+
+for day in horizons:
+
+    horizon_mae = np.mean(
+        np.abs(
+            y_test_actual[:, day - 1] -
+            y_pred_nbeats[:, day - 1]
+        )
+    )
+
+    print(
+        f"Day +{day:02d}: "
+        f"{horizon_mae:.2f}"
+    )
+
+
+# ------------------------------------------------------------
+# Prediction distribution
+# ------------------------------------------------------------
+
+print("\nPrediction distribution:")
+
+print(
+    f"Actual mean: "
+    f"{np.mean(y_test_actual):.2f}"
+)
+
+print(
+    f"Predicted mean: "
+    f"{np.mean(y_pred_nbeats):.2f}"
+)
+
+print(
+    f"Actual std: "
+    f"{np.std(y_test_actual):.2f}"
+)
+
+print(
+    f"Predicted std: "
+    f"{np.std(y_pred_nbeats):.2f}"
+)
+
+print(
+    f"Actual range: "
+    f"{np.min(y_test_actual):.0f} → "
+    f"{np.max(y_test_actual):.0f}"
+)
+
+print(
+    f"Predicted range: "
+    f"{np.min(y_pred_nbeats):.0f} → "
+    f"{np.max(y_pred_nbeats):.0f}"
+)
+
+
+# ------------------------------------------------------------
+# First 30-day forecast example
+# ------------------------------------------------------------
+
+print("\nFirst test sample — actual:")
+print(
+    np.round(
+        y_test_actual[0]
+    ).astype(int)
+)
+
+print("\nFirst test sample — N-BEATS-style prediction:")
+print(
+    np.round(
+        y_pred_nbeats[0]
+    ).astype(int)
+)
+
+# %%
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# =========================================================
+# TEST DATES
+# =========================================================
+
+test_target_dates = target_dates_B[test_mask_B]
+
+print("Number of test forecast windows:", len(test_target_dates))
+print("First forecast:", test_target_dates.min())
+print("Last forecast:", test_target_dates.max())
+
+
+# =========================================================
+# FUNCTION:
+# Convert overlapping 30-day forecasts into
+# one prediction for each calendar day
+# =========================================================
+
+def reconstruct_daily_predictions(predictions, start_dates, horizon=30):
+
+    daily_predictions = {}
+
+    for i, start_date in enumerate(start_dates):
+
+        for h in range(horizon):
+
+            date = pd.Timestamp(start_date) + pd.Timedelta(days=h)
+
+            if date not in daily_predictions:
+                daily_predictions[date] = []
+
+            daily_predictions[date].append(predictions[i, h])
+
+    # Average overlapping forecasts for the same day
+    daily_predictions = {
+        date: np.mean(values)
+        for date, values in daily_predictions.items()
+    }
+
+    return pd.Series(daily_predictions).sort_index()
+
+
+# =========================================================
+# CREATE DAILY PREDICTIONS
+# =========================================================
+
+lstm_daily = reconstruct_daily_predictions(
+    y_pred_B_corrected,
+    test_target_dates
+)
+
+tcn_daily = reconstruct_daily_predictions(
+    y_pred_tcn_B,
+    test_target_dates
+)
+
+transformer_daily = reconstruct_daily_predictions(
+    y_pred_transformer,
+    test_target_dates
+)
+
+nbeats_daily = reconstruct_daily_predictions(
+    y_pred_nbeats,
+    test_target_dates
+)
+
+
+# =========================================================
+# ACTUAL ARRIVALS
+# =========================================================
+
+actual_daily = df_weekly.set_index("date")["arrivals"]
+
+
+# =========================================================
+# COMMON DATES
+# =========================================================
+
+common_dates = (
+    actual_daily.index
+    .intersection(lstm_daily.index)
+    .intersection(tcn_daily.index)
+    .intersection(transformer_daily.index)
+    .intersection(nbeats_daily.index)
+)
+
+
+# =========================================================
+# FINAL FULL-PERIOD RESULTS TABLE
+# =========================================================
+
+results = pd.DataFrame({
+    "Actual": actual_daily.loc[common_dates],
+    "LSTM": lstm_daily.loc[common_dates],
+    "TCN": tcn_daily.loc[common_dates],
+    "Transformer": transformer_daily.loc[common_dates],
+    "N-BEATS": nbeats_daily.loc[common_dates]
+})
+
+print()
+print("==============================================")
+print("FULL TEST PERIOD")
+print("==============================================")
+print("Start:", results.index.min())
+print("End:  ", results.index.max())
+print("Number of daily observations:", len(results))
+
+print()
+print(results.head())
+print()
+print(results.tail())
+
+# %%
+plt.figure(figsize=(20, 8))
+
+plt.plot(
+    results.index,
+    results["Actual"],
+    label="Actual",
+    linewidth=2
+)
+
+plt.plot(
+    results.index,
+    results["LSTM"],
+    label="LSTM",
+    linewidth=1.5
+)
+
+plt.plot(
+    results.index,
+    results["TCN"],
+    label="TCN",
+    linewidth=1.5
+)
+
+plt.plot(
+    results.index,
+    results["Transformer"],
+    label="Transformer",
+    linewidth=1.5
+)
+
+plt.plot(
+    results.index,
+    results["N-BEATS"],
+    label="N-BEATS",
+    linewidth=1.5
+)
+
+plt.title(
+    "Actual vs Predicted Sri Lankan Tourist Arrivals\n"
+    "Test Period: January 2025 – July 2026",
+    fontsize=16
+)
+
+plt.xlabel("Date", fontsize=12)
+plt.ylabel("Tourist Arrivals", fontsize=12)
+
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+
+# %%
+models = [
+    "LSTM",
+    "TCN",
+    "Transformer",
+    "N-BEATS"
+]
+
+for model in models:
+
+    plt.figure(figsize=(20, 7))
+
+    # Actual values
+    plt.plot(
+        results.index,
+        results["Actual"],
+        label="Actual",
+        linewidth=2
+    )
+
+    # Model predictions
+    plt.plot(
+        results.index,
+        results[model],
+        label=model,
+        linewidth=1.5
+    )
+
+    plt.title(
+        f"Actual vs {model} Predicted Tourist Arrivals\n"
+        "Test Period: January 2025 – July 2026",
+        fontsize=16
+    )
+
+    plt.xlabel("Date", fontsize=12)
+    plt.ylabel("Tourist Arrivals", fontsize=12)
+
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+# %%
+models = [
+    "LSTM",
+    "TCN",
+    "Transformer",
+    "N-BEATS"
+]
+
+plt.figure(figsize=(20, 8))
+
+for model in models:
+
+    # Absolute prediction error
+    absolute_error = np.abs(
+        results[model] - results["Actual"]
+    )
+
+    # 30-day rolling MAE
+    rolling_mae = absolute_error.rolling(
+        window=30,
+        min_periods=30
+    ).mean()
+
+    plt.plot(
+        results.index,
+        rolling_mae,
+        label=model,
+        linewidth=1.8
+    )
+
+plt.title(
+    "30-Day Rolling MAE Across the Test Period\n"
+    "January 2025 – July 2026",
+    fontsize=16
+)
+
+plt.xlabel("Date", fontsize=12)
+plt.ylabel("30-Day Rolling MAE", fontsize=12)
+
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# %%
+models = [
+    "LSTM",
+    "TCN",
+    "Transformer",
+    "N-BEATS"
+]
+
+plt.figure(figsize=(20, 8))
+
+for model in models:
+
+    error = results[model] - results["Actual"]
+
+    plt.plot(
+        results.index,
+        error,
+        label=model,
+        linewidth=1.5
+    )
+
+# Zero-error reference line
+plt.axhline(
+    0,
+    linewidth=1
+)
+
+plt.title(
+    "Prediction Error Across the Test Period\n"
+    "January 2025 – July 2026",
+    fontsize=16
+)
+
+plt.xlabel("Date", fontsize=12)
+plt.ylabel("Prediction Error (Predicted − Actual)", fontsize=12)
+
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# %%
+# =========================================================
+# FINAL MODEL METRICS
+# =========================================================
+
+metrics = pd.DataFrame({
+    "Model": [
+        "LSTM",
+        "TCN",
+        "Transformer",
+        "N-BEATS"
+    ],
+    "MAE": [
+        1300.38,
+        1330.41,
+        1654.65,
+        1652.87
+    ],
+    "RMSE": [
+        1787.63,
+        1868.03,
+        2058.20,
+        2237.67
+    ],
+    "sMAPE": [
+        20.50,
+        20.62,
+        26.02,
+        26.11
+    ],
+    "MASE": [
+        7.2941,
+        7.4625,
+        9.2813,
+        9.2713
+    ]
+})
+
+
+# =========================================================
+# CREATE FOUR SEPARATE GRAPHS
+# =========================================================
+
+metric_names = ["MAE", "RMSE", "sMAPE", "MASE"]
+
+for metric in metric_names:
+
+    plt.figure(figsize=(10, 6))
+
+    bars = plt.bar(
+        metrics["Model"],
+        metrics[metric]
+    )
+
+    # Add exact values above each bar
+    for bar, value in zip(bars, metrics[metric]):
+
+        if metric in ["sMAPE"]:
+            label = f"{value:.2f}%"
+        elif metric == "MASE":
+            label = f"{value:.4f}"
+        else:
+            label = f"{value:.2f}"
+
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=10
+        )
+
+    plt.title(
+        f"{metric} Comparison Across Deep Learning Models",
+        fontsize=15
+    )
+
+    plt.xlabel("Model")
+    plt.ylabel(metric)
+
+    plt.grid(
+        axis="y",
+        alpha=0.3
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+# %%
+# =========================================================
+# MONTHLY AVERAGES
+# =========================================================
+
+monthly_results = results.resample("MS").mean()
+
+print("Monthly observations:", len(monthly_results))
+print("Period:", monthly_results.index.min(), "to", monthly_results.index.max())
+
+print()
+print(monthly_results)
+
+# %%
+plt.figure(figsize=(18, 8))
+
+plt.plot(
+    monthly_results.index,
+    monthly_results["Actual"],
+    marker="o",
+    linewidth=2.5,
+    label="Actual"
+)
+
+plt.plot(
+    monthly_results.index,
+    monthly_results["LSTM"],
+    marker="o",
+    linewidth=1.8,
+    label="LSTM"
+)
+
+plt.plot(
+    monthly_results.index,
+    monthly_results["TCN"],
+    marker="o",
+    linewidth=1.8,
+    label="TCN"
+)
+
+plt.plot(
+    monthly_results.index,
+    monthly_results["Transformer"],
+    marker="o",
+    linewidth=1.8,
+    label="Transformer"
+)
+
+plt.plot(
+    monthly_results.index,
+    monthly_results["N-BEATS"],
+    marker="o",
+    linewidth=1.8,
+    label="N-BEATS"
+)
+
+plt.title(
+    "Monthly Average Actual vs Predicted Tourist Arrivals\n"
+    "January 2025 – July 2026",
+    fontsize=16
+)
+
+plt.xlabel("Month", fontsize=12)
+plt.ylabel("Average Daily Tourist Arrivals", fontsize=12)
+
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+
+plt.xticks(
+    monthly_results.index,
+    monthly_results.index.strftime("%b %Y"),
+    rotation=45
+)
+
+plt.tight_layout()
+plt.show()
+
+# %%
+
+
+
