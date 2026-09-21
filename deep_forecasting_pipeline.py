@@ -471,3 +471,99 @@ print("\n" + "=" * 90)
 print("CLASSIFICATION COMPLETE")
 print("=" * 90)
 print("No columns were removed or modified.")
+
+# ============================================================
+# CONSTRUCT FINAL MODELING FEATURES DATAFRAME
+# ============================================================
+columns_to_drop = [
+    "covid_impact_factor",
+    "crisis_impact_factor",
+    "exchange_rates_complete"
+]
+
+columns_to_drop = [c for c in columns_to_drop if c in df.columns]
+df_model = df.drop(columns=columns_to_drop)
+
+target_column = "arrivals"
+
+historical_features = [
+    "brent_crude_price",
+    "cny_lkr",
+    "eur_lkr",
+    "gbp_lkr",
+    "inr_lkr",
+    "rub_lkr",
+    "usd_lkr",
+    "gdp_per_capita",
+    "inflation_rate",
+    "temperature",
+    "humidity",
+    "precipitation",
+    "wind_speed",
+    "is_rainy_day",
+    "image_search",
+    "web_search",
+    "youtube_search",
+    "cny_lkr_was_missing",
+    "eur_lkr_was_missing",
+    "gbp_lkr_was_missing",
+    "inr_lkr_was_missing",
+    "rub_lkr_was_missing",
+    "usd_lkr_was_missing",
+    "gdp_per_capita_was_missing",
+    "inflation_rate_was_missing"
+]
+
+known_future_base_features = [
+    "year",
+    "month",
+    "day_of_month",
+    "day_of_week",
+    "is_weekend",
+    "month_sin",
+    "month_cos",
+    "day_of_week_sin",
+    "day_of_week_cos",
+    "days_since_last_holiday",
+    "days_since_last_holiday_was_missing",
+    "days_to_next_holiday_was_missing",
+    "in_holiday_window",
+    "is_holiday",
+    "is_tourist_event"
+]
+
+holiday_features = [
+    c for c in df_model.columns
+    if c.startswith("holiday_name_grouped_")
+]
+
+event_features = [
+    c for c in df_model.columns
+    if c.startswith("event_name_grouped_")
+]
+
+known_future_features = (
+    known_future_base_features
+    + holiday_features
+    + event_features
+)
+
+all_features = historical_features + known_future_features
+
+missing_columns = [c for c in all_features + [target_column] if c not in df_model.columns]
+
+if missing_columns:
+    print("ERROR: The following expected columns are missing:")
+    print(missing_columns)
+else:
+    print("All expected feature columns are present.")
+
+modeling_columns = ["date"] + all_features + [target_column]
+df_final = df_model[modeling_columns].copy()
+
+print("\nFinal modeling dataframe shape:")
+print(df_final.shape)
+
+output_filename = "Sri_Lanka_Tourism_Modeling_Features.csv"
+df_final.to_csv(output_filename, index=False)
+print(f"\nSaved modeling dataframe to: {output_filename}")
