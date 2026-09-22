@@ -824,3 +824,75 @@ baseline_results = {
     "Day+30_MAE": mae(y_test[:, 29], seasonal_naive_predictions[:, 29])
 }
 print("Baseline Seasonal Naïve evaluation completed.")
+
+
+# ============================================================
+# LSTM MODEL ARCHITECTURE AND TRAINING
+# ============================================================
+import os
+import random
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Input, LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+
+SEED = 42
+os.environ["PYTHONHASHSEED"] = str(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
+tf.keras.utils.set_random_seed(SEED)
+
+target_scaler = StandardScaler()
+train_arrivals = train_full[["arrivals"]].to_numpy(dtype=np.float32)
+val_arrivals = val_full[["arrivals"]].to_numpy(dtype=np.float32)
+test_arrivals = test_full[["arrivals"]].to_numpy(dtype=np.float32)
+
+target_scaler.fit(train_arrivals)
+
+train_arrivals_scaled = target_scaler.transform(train_arrivals).flatten()
+val_arrivals_scaled = target_scaler.transform(val_arrivals).flatten()
+test_arrivals_scaled = target_scaler.transform(test_arrivals).flatten()
+
+def get_scaled_targets_for_windows(dataframe, scaled_arrivals, input_date_windows, target_date_windows):
+    scaled_arrival_map = dict(zip(dataframe["date"], scaled_arrivals))
+    scaled_input_arrivals = []
+    scaled_target_arrivals = []
+    for input_dates, target_dates in zip(input_date_windows, target_date_windows):
+        scaled_input_arrivals.append([scaled_arrival_map[d] for d in pd.to_datetime(input_dates)])
+        scaled_target_arrivals.append([scaled_arrival_map[d] for d in pd.to_datetime(target_dates)])
+    return np.array(scaled_input_arrivals, dtype=np.float32), np.array(scaled_target_arrivals, dtype=np.float32)
+
+train_arrival_history_scaled, y_train_scaled = get_scaled_targets_for_windows(train_full, train_arrivals_scaled, train_input_dates, train_target_dates)
+val_arrival_history_scaled, y_val_scaled = get_scaled_targets_for_windows(val_full, val_arrivals_scaled, val_input_dates, val_target_dates)
+test_arrival_history_scaled, y_test_scaled = get_scaled_targets_for_windows(test_full, test_arrivals_scaled, test_input_dates, test_target_dates)
+
+X_train_lstm = np.concatenate([X_train, train_arrival_history_scaled[..., np.newaxis]], axis=2)
+X_val_lstm = np.concatenate([X_val, val_arrival_history_scaled[..., np.newaxis]], axis=2)
+X_test_lstm = np.concatenate([X_test, test_arrival_history_scaled[..., np.newaxis]], axis=2)
+
+lstm_checkpoint_path = "best_lstm_model.keras"
+
+lstm_model = Sequential([
+    Input(shape=(input_window, X_train_lstm.shape[2])),
+    LSTM(64, dropout=0.20, recurrent_dropout=0.0),
+    Dense(32, activation="relu"),
+    Dropout(0.20),
+    Dense(forecast_horizon)
+])
+
+lstm_model.compile(optimizer=Adam(learning_rate=0.001), loss="mse", metrics=["mae"])
+
+early_stopping = EarlyStopping(monitor="val_loss", patience=15, min_delta=0.0001, restore_best_weights=True, verbose=1)
+model_checkpoint = ModelCheckpoint(filepath=lstm_checkpoint_path, monitor="val_loss", save_best_only=True, verbose=1)
+
+history_lstm = lstm_model.fit(
+    X_train_lstm,
+    y_train_scaled,
+    validation_data=(X_val_lstm, y_val_scaled),
+    epochs=100,
+    batch_size=32,
+    shuffle=False,
+    callbacks=[early_stopping, model_checkpoint],
+    verbose=1
+)
