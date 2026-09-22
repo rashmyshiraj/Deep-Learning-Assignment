@@ -499,3 +499,437 @@ print(f"MAE:   {mae_tcn:.2f}")
 print(f"RMSE:  {rmse_tcn:.2f}")
 print(f"sMAPE: {smape_tcn:.2f}%")
 print(f"MASE:  {mase_tcn:.4f}")
+
+# %%
+import tensorflow as tf
+from tensorflow.keras.layers import (
+    Input, Dense, Dropout, LayerNormalization,
+    MultiHeadAttention, GlobalAveragePooling1D,
+    Embedding, Add
+)
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.random.set_seed(42)
+
+
+class PositionalEmbedding(tf.keras.layers.Layer):
+    def __init__(self, sequence_length, d_model):
+        super().__init__()
+        self.position_embedding = Embedding(
+            input_dim=sequence_length,
+            output_dim=d_model
+        )
+
+    def call(self, inputs):
+        positions = tf.range(
+            start=0,
+            limit=tf.shape(inputs)[1],
+            delta=1
+        )
+        return inputs + self.position_embedding(positions)
+
+
+def transformer_encoder(x, d_model=64, num_heads=4, ff_dim=128):
+    # Self-attention
+    attention = MultiHeadAttention(
+        num_heads=num_heads,
+        key_dim=d_model // num_heads
+    )(x, x)
+
+    attention = Dropout(0.1)(attention)
+
+    # Residual + normalization
+    x = Add()([x, attention])
+    x = LayerNormalization(epsilon=1e-6)(x)
+
+    # Feed-forward network
+    ff = Dense(ff_dim, activation="relu")(x)
+    ff = Dropout(0.1)(ff)
+    ff = Dense(d_model)(ff)
+
+    # Residual + normalization
+    x = Add()([x, ff])
+    x = LayerNormalization(epsilon=1e-6)(x)
+
+    return x
+
+
+# Input
+inputs = Input(shape=(90, 109))
+
+# Project 109 features → 64-dimensional representation
+x = Dense(64)(inputs)
+
+# Add positional information
+x = PositionalEmbedding(
+    sequence_length=90,
+    d_model=64
+)(x)
+
+# Transformer encoder blocks
+x = transformer_encoder(x)
+x = transformer_encoder(x)
+
+# Convert sequence to forecast
+x = GlobalAveragePooling1D()(x)
+
+x = Dense(64, activation="relu")(x)
+x = Dropout(0.2)(x)
+
+# 30-day output
+outputs = Dense(30)(x)
+
+transformer_model = Model(inputs, outputs)
+
+transformer_model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    loss="mse",
+    metrics=["mae"]
+)
+
+transformer_model.summary()
+
+# %%
+early_stopping_transformer = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_transformer = transformer_model.fit(
+    X_train,
+    y_train_scaled,
+
+    validation_data=(
+        X_val,
+        y_val_scaled
+    ),
+
+    epochs=100,
+    batch_size=32,
+
+    callbacks=[early_stopping_transformer],
+
+    verbose=1
+)
+
+# %%
+y_pred_transformer_scaled = transformer_model.predict(
+    X_test,
+    verbose=1
+)
+
+y_pred_transformer = target_scaler.inverse_transform(
+    y_pred_transformer_scaled.reshape(-1, 1)
+).reshape(y_pred_transformer_scaled.shape)
+
+print("Prediction shape:", y_pred_transformer.shape)
+
+# %%
+y_true = y_test_actual.flatten()
+y_pred = y_pred_transformer.flatten()
+
+mae_transformer = mean_absolute_error(y_true, y_pred)
+
+rmse_transformer = np.sqrt(
+    mean_squared_error(y_true, y_pred)
+)
+
+smape_transformer = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+mase_transformer = np.mean(
+    np.abs(y_true - y_pred)
+) / mase_scale
+
+print("TRANSFORMER TEST RESULTS")
+print("------------------------")
+print(f"MAE:   {mae_transformer:.2f}")
+print(f"RMSE:  {rmse_transformer:.2f}")
+print(f"sMAPE: {smape_transformer:.2f}%")
+print(f"MASE:  {mase_transformer:.4f}")
+
+# %%
+import tensorflow as tf
+from tensorflow.keras.layers import (
+    Input, Dense, Dropout, Flatten, Subtract, Add
+)
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.random.set_seed(42)
+
+
+def nbeats_block(x, hidden_units=256, input_size=256, forecast_size=30):
+
+    # Shared fully connected layers
+    h = Dense(hidden_units, activation="relu")(x)
+    h = Dense(hidden_units, activation="relu")(h)
+    h = Dense(128, activation="relu")(h)
+    h = Dropout(0.2)(h)
+
+    # Backcast must have the SAME size as x
+    backcast = Dense(input_size)(h)
+
+    # 30-day forecast
+    forecast = Dense(forecast_size)(h)
+
+    return backcast, forecast
+
+
+# Input: 90 days × 109 features
+inputs = Input(shape=(90, 109))
+
+# Flatten to 9810 values
+x = Flatten()(inputs)
+
+# Project to fixed N-BEATS representation
+x = Dense(256, activation="relu")(x)
+
+# -------------------------
+# Block 1
+# -------------------------
+backcast1, forecast1 = nbeats_block(x)
+
+residual1 = Subtract()([
+    x,
+    backcast1
+])
+
+# -------------------------
+# Block 2
+# -------------------------
+backcast2, forecast2 = nbeats_block(residual1)
+
+residual2 = Subtract()([
+    residual1,
+    backcast2
+])
+
+# -------------------------
+# Block 3
+# -------------------------
+backcast3, forecast3 = nbeats_block(residual2)
+
+# Combine forecasts
+outputs = Add()([
+    forecast1,
+    forecast2,
+    forecast3
+])
+
+# Create model
+nbeats_model = Model(
+    inputs=inputs,
+    outputs=outputs
+)
+
+# Compile
+nbeats_model.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.001
+    ),
+    loss="mse",
+    metrics=["mae"]
+)
+
+nbeats_model.summary()
+
+# %%
+early_stopping_nbeats = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_nbeats = nbeats_model.fit(
+    X_train,
+    y_train_scaled,
+
+    validation_data=(
+        X_val,
+        y_val_scaled
+    ),
+
+    epochs=100,
+    batch_size=32,
+
+    callbacks=[early_stopping_nbeats],
+
+    verbose=1
+)
+
+# %%
+y_pred_nbeats_scaled = nbeats_model.predict(
+    X_test,
+    verbose=1
+)
+
+y_pred_nbeats = target_scaler.inverse_transform(
+    y_pred_nbeats_scaled.reshape(-1, 1)
+).reshape(y_pred_nbeats_scaled.shape)
+
+print("Prediction shape:", y_pred_nbeats.shape)
+
+# %%
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import numpy as np
+
+y_true = y_test_actual.flatten()
+y_pred = y_pred_nbeats.flatten()
+
+# MAE
+mae = mean_absolute_error(y_true, y_pred)
+
+# RMSE
+rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+
+# sMAPE
+smape = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+# MASE — same calculation used for the other models
+train_arrivals = train_df["arrivals"].values
+
+naive_errors = np.abs(
+    train_arrivals[1:] - train_arrivals[:-1]
+)
+
+mase_scale = np.mean(naive_errors)
+
+mase = np.mean(
+    np.abs(y_true - y_pred)
+) / mase_scale
+
+print("N-BEATS-Style Test Results")
+print("--------------------------")
+print(f"MAE:   {mae:.2f}")
+print(f"RMSE:  {rmse:.2f}")
+print(f"sMAPE: {smape:.2f}%")
+print(f"MASE:  {mase:.4f}")
+
+# %%
+import matplotlib.pyplot as plt
+
+models = {
+    "LSTM": y_pred_lstm,
+    "TCN": y_pred_tcn,
+    "Transformer": y_pred_transformer,
+    "N-BEATS-style": y_pred_nbeats
+}
+
+# Dates for the first 30-day test forecast
+forecast_dates = target_dates[test_mask.values][:30]
+
+for name, predictions in models.items():
+
+    plt.figure(figsize=(12, 5))
+
+    plt.plot(
+        forecast_dates,
+        y_test_actual[0],
+        label="Actual",
+        linewidth=2
+    )
+
+    plt.plot(
+        forecast_dates,
+        predictions[0],
+        label="Predicted",
+        linewidth=2
+    )
+
+    plt.title(
+        f"{name}: Actual vs Predicted — First 30-Day Test Forecast"
+    )
+
+    plt.xlabel("Date")
+    plt.ylabel("Tourist Arrivals")
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    plt.show()
+
+# %%
+import matplotlib.pyplot as plt
+
+histories = {
+    "LSTM": history_lstm,
+    "TCN": history_tcn,
+    "Transformer": history_transformer,
+    "N-BEATS-style": history_nbeats
+}
+
+for name, history in histories.items():
+
+    plt.figure(figsize=(10, 5))
+
+    plt.plot(
+        history.history["loss"],
+        label="Training Loss",
+        linewidth=2
+    )
+
+    plt.plot(
+        history.history["val_loss"],
+        label="Validation Loss",
+        linewidth=2
+    )
+
+    plt.title(f"{name}: Training vs Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    plt.show()
+
+# %%
+import matplotlib.pyplot as plt
+
+models = ["LSTM", "TCN", "Transformer", "N-BEATS-style"]
+
+mae = [1552.42, 1911.47, 2532.51, 2659.23]
+rmse = [2212.47, 2945.04, 3590.27, 3704.99]
+smape = [26.40, 33.28, 55.56, 58.54]
+mase = [9.0193, 11.1052, 14.7133, 15.4496]
+
+metrics = {
+    "MAE": mae,
+    "RMSE": rmse,
+    "sMAPE (%)": smape,
+    "MASE": mase
+}
+
+for metric, values in metrics.items():
+
+    plt.figure(figsize=(9, 5))
+
+    bars = plt.bar(models, values)
+
+    plt.title(f"Model Comparison — {metric}")
+    plt.ylabel(metric)
+    plt.xlabel("Model")
+    plt.xticks(rotation=20)
+
+    # Display values above bars
+    for bar, value in zip(bars, values):
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{value:.2f}",
+            ha="center",
+            va="bottom"
+        )
+
+    plt.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.show()
