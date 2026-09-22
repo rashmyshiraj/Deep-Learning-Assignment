@@ -896,3 +896,39 @@ history_lstm = lstm_model.fit(
     callbacks=[early_stopping, model_checkpoint],
     verbose=1
 )
+
+# ============================================================
+# LSTM TEST SET EVALUATION
+# ============================================================
+best_lstm_model = tf.keras.models.load_model(lstm_checkpoint_path)
+lstm_test_predictions_scaled = best_lstm_model.predict(X_test_lstm, verbose=1)
+
+lstm_test_predictions = target_scaler.inverse_transform(
+    lstm_test_predictions_scaled.reshape(-1, 1)
+).reshape(lstm_test_predictions_scaled.shape)
+
+lstm_test_actuals = target_scaler.inverse_transform(
+    y_test_scaled.reshape(-1, 1)
+).reshape(y_test_scaled.shape)
+
+lstm_mae = mae(lstm_test_actuals, lstm_test_predictions)
+lstm_rmse = rmse(lstm_test_actuals, lstm_test_predictions)
+lstm_smape = smape(lstm_test_actuals, lstm_test_predictions)
+lstm_mase = mase(lstm_test_actuals, lstm_test_predictions, mase_denominator)
+
+lstm_results = {
+    "model": "LSTM",
+    "MAE": lstm_mae,
+    "RMSE": lstm_rmse,
+    "sMAPE": lstm_smape,
+    "MASE": lstm_mase,
+    "Day+1_MAE": mae(lstm_test_actuals[:, 0], lstm_test_predictions[:, 0]),
+    "Day+7_MAE": mae(lstm_test_actuals[:, 6], lstm_test_predictions[:, 6]),
+    "Day+14_MAE": mae(lstm_test_actuals[:, 13], lstm_test_predictions[:, 13]),
+    "Day+21_MAE": mae(lstm_test_actuals[:, 20], lstm_test_predictions[:, 20]),
+    "Day+30_MAE": mae(lstm_test_actuals[:, 29], lstm_test_predictions[:, 29]),
+    "parameter_count": best_lstm_model.count_params()
+}
+
+lstm_results_df = pd.DataFrame([lstm_results])
+lstm_results_df.to_csv("lstm_test_results.csv", index=False)
