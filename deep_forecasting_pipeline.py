@@ -683,3 +683,70 @@ val_full.to_csv("val_scaled.csv", index=False)
 test_full.to_csv("test_scaled.csv", index=False)
 
 print("Chronological split and scaling complete.")
+
+# ============================================================
+# SLIDING WINDOW CREATION (90-DAY INPUT, 30-DAY HORIZON)
+# ============================================================
+input_window = 90
+forecast_horizon = 30
+
+def create_windows(dataframe, feature_columns, target_column,
+                   input_window=90, forecast_horizon=30):
+
+    feature_values = dataframe[feature_columns].to_numpy(dtype=np.float32)
+    target_values = dataframe[target_column].to_numpy(dtype=np.float32)
+    dates = dataframe["date"].to_numpy()
+
+    X_windows = []
+    y_windows = []
+    input_date_windows = []
+    target_date_windows = []
+
+    max_start = len(dataframe) - input_window - forecast_horizon + 1
+
+    for start_index in range(max_start):
+        input_start = start_index
+        input_end = start_index + input_window
+
+        target_start = input_end
+        target_end = target_start + forecast_horizon
+
+        X_windows.append(feature_values[input_start:input_end])
+        y_windows.append(target_values[target_start:target_end])
+
+        input_date_windows.append(dates[input_start:input_end])
+        target_date_windows.append(dates[target_start:target_end])
+
+    return (
+        np.array(X_windows, dtype=np.float32),
+        np.array(y_windows, dtype=np.float32),
+        np.array(input_date_windows),
+        np.array(target_date_windows)
+    )
+
+X_train, y_train, train_input_dates, train_target_dates = create_windows(
+    train_full,
+    feature_columns,
+    target_column,
+    input_window,
+    forecast_horizon
+)
+
+X_val, y_val, val_input_dates, val_target_dates = create_windows(
+    val_full,
+    feature_columns,
+    target_column,
+    input_window,
+    forecast_horizon
+)
+
+X_test, y_test, test_input_dates, test_target_dates = create_windows(
+    test_full,
+    feature_columns,
+    target_column,
+    input_window,
+    forecast_horizon
+)
+
+assert X_train.ndim == 3 and X_val.ndim == 3 and X_test.ndim == 3
+print("3D time series tensor windows generated successfully.")
