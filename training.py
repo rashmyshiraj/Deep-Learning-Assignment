@@ -217,3 +217,285 @@ print("y_test_scaled:", y_test_scaled.shape)
 
 print("\nScaled train mean:", y_train_scaled.mean())
 print("Scaled train std:", y_train_scaled.std())
+
+# %%
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+
+# Reproducibility
+tf.random.set_seed(42)
+
+# Build Stacked LSTM
+lstm_model = Sequential([
+    LSTM(
+        64,
+        return_sequences=True,
+        input_shape=(90, 109)
+    ),
+
+    Dropout(0.2),
+
+    LSTM(
+        32,
+        return_sequences=False
+    ),
+
+    Dense(64, activation="relu"),
+
+    Dropout(0.2),
+
+    Dense(30)
+])
+
+# Compile
+lstm_model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    loss="mse",
+    metrics=["mae"]
+)
+
+# Display architecture
+lstm_model.summary()
+
+# %%
+early_stopping = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_lstm = lstm_model.fit(
+    X_train,
+    y_train_scaled,
+
+    validation_data=(
+        X_val,
+        y_val_scaled
+    ),
+
+    epochs=100,
+    batch_size=32,
+
+    callbacks=[early_stopping],
+
+    verbose=1
+)
+
+# %%
+# Predict the 30-day forecasts for the test set
+y_pred_lstm_scaled = lstm_model.predict(
+    X_test,
+    verbose=1
+)
+
+print("Prediction shape:", y_pred_lstm_scaled.shape)
+
+# %%
+# Convert predictions back to actual tourist-arrival values
+y_pred_lstm = target_scaler.inverse_transform(
+    y_pred_lstm_scaled.reshape(-1, 1)
+).reshape(y_pred_lstm_scaled.shape)
+
+# Convert actual test values back as well
+y_test_actual = target_scaler.inverse_transform(
+    y_test_scaled.reshape(-1, 1)
+).reshape(y_test_scaled.shape)
+
+print("Predictions shape:", y_pred_lstm.shape)
+print("Actual shape:", y_test_actual.shape)
+
+print("\nFirst prediction:")
+print(y_pred_lstm[0])
+
+print("\nFirst actual 30 days:")
+print(y_test_actual[0])
+
+# %%
+import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# Flatten all 548 × 30 predictions into one array
+y_true = y_test_actual.flatten()
+y_pred = y_pred_lstm.flatten()
+
+# MAE
+mae = mean_absolute_error(y_true, y_pred)
+
+# RMSE
+rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+
+# sMAPE
+smape = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+# MASE
+# Naive one-step seasonal benchmark using lag-1 arrivals
+train_arrivals = train_df["arrivals"].values
+
+naive_errors = np.abs(
+    train_arrivals[1:] - train_arrivals[:-1]
+)
+
+mase_scale = np.mean(naive_errors)
+
+mase = np.mean(np.abs(y_true - y_pred)) / mase_scale
+
+print("LSTM TEST RESULTS")
+print("-----------------")
+print(f"MAE:   {mae:.2f}")
+print(f"RMSE:  {rmse:.2f}")
+print(f"sMAPE: {smape:.2f}%")
+print(f"MASE:  {mase:.4f}")
+
+# %%
+import tensorflow as tf
+from tensorflow.keras.layers import (
+    Input, Conv1D, BatchNormalization,
+    Activation, Add, Dropout,
+    GlobalAveragePooling1D, Dense
+)
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.random.set_seed(42)
+
+
+def tcn_residual_block(x, filters, kernel_size, dilation_rate):
+    # First causal convolution
+    conv1 = Conv1D(
+        filters=filters,
+        kernel_size=kernel_size,
+        padding="causal",
+        dilation_rate=dilation_rate
+    )(x)
+
+    conv1 = BatchNormalization()(conv1)
+    conv1 = Activation("relu")(conv1)
+    conv1 = Dropout(0.2)(conv1)
+
+    # Second causal convolution
+    conv2 = Conv1D(
+        filters=filters,
+        kernel_size=kernel_size,
+        padding="causal",
+        dilation_rate=dilation_rate
+    )(conv1)
+
+    conv2 = BatchNormalization()(conv2)
+    conv2 = Activation("relu")(conv2)
+    conv2 = Dropout(0.2)(conv2)
+
+    # Residual connection
+    if x.shape[-1] != filters:
+        x = Conv1D(
+            filters=filters,
+            kernel_size=1,
+            padding="same"
+        )(x)
+
+    return Add()([x, conv2])
+
+
+# Input
+inputs = Input(shape=(90, 109))
+
+x = Conv1D(
+    filters=64,
+    kernel_size=3,
+    padding="causal"
+)(inputs)
+
+# Dilated TCN blocks
+for dilation in [1, 2, 4, 8, 16]:
+    x = tcn_residual_block(
+        x,
+        filters=64,
+        kernel_size=3,
+        dilation_rate=dilation
+    )
+
+# Convert sequence to vector
+x = GlobalAveragePooling1D()(x)
+
+x = Dense(64, activation="relu")(x)
+x = Dropout(0.2)(x)
+
+# 30-day forecast
+outputs = Dense(30)(x)
+
+tcn_model = Model(inputs, outputs)
+
+tcn_model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    loss="mse",
+    metrics=["mae"]
+)
+
+tcn_model.summary()
+
+# %%
+early_stopping_tcn = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_tcn = tcn_model.fit(
+    X_train,
+    y_train_scaled,
+
+    validation_data=(
+        X_val,
+        y_val_scaled
+    ),
+
+    epochs=100,
+    batch_size=32,
+
+    callbacks=[early_stopping_tcn],
+
+    verbose=1
+)
+
+# %%
+y_pred_tcn_scaled = tcn_model.predict(
+    X_test,
+    verbose=1
+)
+
+# Convert back to actual arrival counts
+y_pred_tcn = target_scaler.inverse_transform(
+    y_pred_tcn_scaled.reshape(-1, 1)
+).reshape(y_pred_tcn_scaled.shape)
+
+print("TCN prediction shape:", y_pred_tcn.shape)
+
+# %%
+y_true = y_test_actual.flatten()
+y_pred = y_pred_tcn.flatten()
+
+mae_tcn = mean_absolute_error(y_true, y_pred)
+
+rmse_tcn = np.sqrt(
+    mean_squared_error(y_true, y_pred)
+)
+
+smape_tcn = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+mase_tcn = np.mean(
+    np.abs(y_true - y_pred)
+) / mase_scale
+
+print("TCN TEST RESULTS")
+print("----------------")
+print(f"MAE:   {mae_tcn:.2f}")
+print(f"RMSE:  {rmse_tcn:.2f}")
+print(f"sMAPE: {smape_tcn:.2f}%")
+print(f"MASE:  {mase_tcn:.4f}")
