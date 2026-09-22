@@ -750,3 +750,77 @@ X_test, y_test, test_input_dates, test_target_dates = create_windows(
 
 assert X_train.ndim == 3 and X_val.ndim == 3 and X_test.ndim == 3
 print("3D time series tensor windows generated successfully.")
+
+
+# ============================================================
+# SEASONAL NAÏVE BASELINE MODEL (7-DAY PERIODICITY)
+# ============================================================
+seasonal_period = 7
+
+def seasonal_naive_forecast(history_values, horizon, seasonal_period=7):
+    history_values = list(history_values)
+    predictions = []
+    for _ in range(horizon):
+        next_prediction = history_values[-seasonal_period]
+        predictions.append(next_prediction)
+        history_values.append(next_prediction)
+    return np.array(predictions, dtype=np.float32)
+
+seasonal_naive_predictions = []
+for sample_index in range(len(y_test)):
+    target_start_date = pd.Timestamp(test_target_dates[sample_index][0])
+    history_end_date = target_start_date - pd.Timedelta(days=1)
+    history_start_date = history_end_date - pd.Timedelta(days=seasonal_period - 1)
+
+    history_values = test_full.loc[
+        (test_full["date"] >= history_start_date) &
+        (test_full["date"] <= history_end_date),
+        target_column
+    ].to_numpy(dtype=np.float32)
+
+    prediction = seasonal_naive_forecast(
+        history_values=history_values,
+        horizon=forecast_horizon,
+        seasonal_period=seasonal_period
+    )
+    seasonal_naive_predictions.append(prediction)
+
+seasonal_naive_predictions = np.array(seasonal_naive_predictions)
+
+def mae(y_true, y_pred):
+    return np.mean(np.abs(y_true - y_pred))
+
+def rmse(y_true, y_pred):
+    return np.sqrt(np.mean((y_true - y_pred) ** 2))
+
+def smape(y_true, y_pred):
+    denominator = np.abs(y_true) + np.abs(y_pred)
+    denominator = np.where(denominator == 0, 1e-8, denominator)
+    return 100 * np.mean(2 * np.abs(y_pred - y_true) / denominator)
+
+train_target_values = train_full[target_column].to_numpy(dtype=np.float32)
+mase_denominator = np.mean(
+    np.abs(train_target_values[seasonal_period:] - train_target_values[:-seasonal_period])
+)
+
+def mase(y_true, y_pred, denominator):
+    return np.mean(np.abs(y_true - y_pred)) / denominator
+
+baseline_mae = mae(y_test, seasonal_naive_predictions)
+baseline_rmse = rmse(y_test, seasonal_naive_predictions)
+baseline_smape = smape(y_test, seasonal_naive_predictions)
+baseline_mase = mase(y_test, seasonal_naive_predictions, mase_denominator)
+
+baseline_results = {
+    "model": "Seasonal Naive (7-day)",
+    "MAE": baseline_mae,
+    "RMSE": baseline_rmse,
+    "sMAPE": baseline_smape,
+    "MASE": baseline_mase,
+    "Day+1_MAE": mae(y_test[:, 0], seasonal_naive_predictions[:, 0]),
+    "Day+7_MAE": mae(y_test[:, 6], seasonal_naive_predictions[:, 6]),
+    "Day+14_MAE": mae(y_test[:, 13], seasonal_naive_predictions[:, 13]),
+    "Day+21_MAE": mae(y_test[:, 20], seasonal_naive_predictions[:, 20]),
+    "Day+30_MAE": mae(y_test[:, 29], seasonal_naive_predictions[:, 29])
+}
+print("Baseline Seasonal Naïve evaluation completed.")
