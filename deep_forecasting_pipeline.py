@@ -932,3 +932,59 @@ lstm_results = {
 
 lstm_results_df = pd.DataFrame([lstm_results])
 lstm_results_df.to_csv("lstm_test_results.csv", index=False)
+
+
+# ============================================================
+# GRU + TEMPORAL ATTENTION MODEL
+# ============================================================
+from tensorflow.keras.layers import GRU, Attention, GlobalAveragePooling1D, Concatenate
+from tensorflow.keras.models import Model
+
+gru_inputs = Input(shape=(input_window, X_train_lstm.shape[2]), name="historical_inputs")
+gru_sequence = GRU(units=64, dropout=0.20, return_sequences=True, name="gru_encoder")(gru_inputs)
+attention_sequence = Attention(name="temporal_attention")([gru_sequence, gru_sequence])
+attention_context = GlobalAveragePooling1D(name="attention_context")(attention_sequence)
+gru_context = GlobalAveragePooling1D(name="gru_context")(gru_sequence)
+combined_context = Concatenate(name="combined_context")([gru_context, attention_context])
+
+x = Dense(64, activation="relu", name="dense_hidden")(combined_context)
+x = Dropout(0.20, name="dropout_hidden")(x)
+gru_outputs = Dense(forecast_horizon, name="forecast_output")(x)
+
+gru_attention_model = Model(inputs=gru_inputs, outputs=gru_outputs, name="GRU_Temporal_Attention")
+gru_attention_model.compile(optimizer=Adam(learning_rate=0.001), loss="mse", metrics=["mae"])
+
+gru_attention_checkpoint_path = "best_gru_attention_model.keras"
+gru_early_stopping = EarlyStopping(monitor="val_loss", patience=15, min_delta=0.0001, restore_best_weights=True, verbose=1)
+gru_model_checkpoint = ModelCheckpoint(filepath=gru_attention_checkpoint_path, monitor="val_loss", save_best_only=True, verbose=1)
+
+history_gru_attention = gru_attention_model.fit(
+    X_train_lstm,
+    y_train_scaled,
+    validation_data=(X_val_lstm, y_val_scaled),
+    epochs=100,
+    batch_size=32,
+    shuffle=False,
+    callbacks=[gru_early_stopping, gru_model_checkpoint],
+    verbose=1
+)
+
+best_gru_attention_model = tf.keras.models.load_model(gru_attention_checkpoint_path)
+gru_attention_predictions_scaled = best_gru_attention_model.predict(X_test_lstm, verbose=1)
+gru_attention_predictions = target_scaler.inverse_transform(gru_attention_predictions_scaled.reshape(-1, 1)).reshape(gru_attention_predictions_scaled.shape)
+gru_attention_actuals = target_scaler.inverse_transform(y_test_scaled.reshape(-1, 1)).reshape(y_test_scaled.shape)
+
+gru_attention_results = {
+    "model": "GRU + Temporal Attention",
+    "MAE": mae(gru_attention_actuals, gru_attention_predictions),
+    "RMSE": rmse(gru_attention_actuals, gru_attention_predictions),
+    "sMAPE": smape(gru_attention_actuals, gru_attention_predictions),
+    "MASE": mase(gru_attention_actuals, gru_attention_predictions, mase_denominator),
+    "Day+1_MAE": mae(gru_attention_actuals[:, 0], gru_attention_predictions[:, 0]),
+    "Day+7_MAE": mae(gru_attention_actuals[:, 6], gru_attention_predictions[:, 6]),
+    "Day+14_MAE": mae(gru_attention_actuals[:, 13], gru_attention_predictions[:, 13]),
+    "Day+21_MAE": mae(gru_attention_actuals[:, 20], gru_attention_predictions[:, 20]),
+    "Day+30_MAE": mae(gru_attention_actuals[:, 29], gru_attention_predictions[:, 29]),
+    "parameter_count": best_gru_attention_model.count_params()
+}
+pd.DataFrame([gru_attention_results]).to_csv("gru_attention_test_results.csv", index=False)
