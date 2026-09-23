@@ -1058,3 +1058,105 @@ tcn_results = {
     "parameter_count": best_tcn_model.count_params()
 }
 pd.DataFrame([tcn_results]).to_csv("tcn_test_results.csv", index=False)
+
+# ============================================================
+# TEMPORAL FUSION TRANSFORMER (TFT) STYLE FORECASTER
+# ============================================================
+from tensorflow.keras.layers import MultiHeadAttention, LayerNormalization, TimeDistributed, Reshape
+
+historical_observed_features = [
+    "brent_crude_price", "cny_lkr", "eur_lkr", "gbp_lkr", "inr_lkr", "rub_lkr", "usd_lkr",
+    "gdp_per_capita", "inflation_rate", "temperature", "humidity", "precipitation",
+    "wind_speed", "is_rainy_day", "image_search", "web_search", "youtube_search",
+    "cny_lkr_was_missing", "eur_lkr_was_missing", "gbp_lkr_was_missing",
+    "inr_lkr_was_missing", "rub_lkr_was_missing", "usd_lkr_was_missing",
+    "gdp_per_capita_was_missing", "inflation_rate_was_missing"
+]
+
+historical_feature_indices = [feature_columns.index(f) for f in historical_observed_features]
+known_future_feature_indices = [feature_columns.index(f) for f in known_future_features]
+
+X_train_tft_encoder = np.concatenate([
+    X_train[:, :, historical_feature_indices],
+    X_train[:, :, known_future_feature_indices],
+    train_arrival_history_scaled[..., np.newaxis]
+], axis=2)
+
+X_val_tft_encoder = np.concatenate([
+    X_val[:, :, historical_feature_indices],
+    X_val[:, :, known_future_feature_indices],
+    val_arrival_history_scaled[..., np.newaxis]
+], axis=2)
+
+X_test_tft_encoder = np.concatenate([
+    X_test[:, :, historical_feature_indices],
+    X_test[:, :, known_future_feature_indices],
+    test_arrival_history_scaled[..., np.newaxis]
+], axis=2)
+
+def build_future_known_tensor(dataframe, known_future_features, target_date_windows):
+    feature_lookup = dataframe.set_index("date")[known_future_features]
+    future_known_windows = []
+    for target_dates in target_date_windows:
+        future_known_windows.append(feature_lookup.loc[pd.to_datetime(target_dates), known_future_features].to_numpy(dtype=np.float32))
+    return np.array(future_known_windows, dtype=np.float32)
+
+X_train_tft_decoder = build_future_known_tensor(train_full, known_future_features, train_target_dates)
+X_val_tft_decoder = build_future_known_tensor(val_full, known_future_features, val_target_dates)
+X_test_tft_decoder = build_future_known_tensor(test_full, known_future_features, test_target_dates)
+
+encoder_inputs = Input(shape=(90, X_train_tft_encoder.shape[2]), name="encoder_historical_inputs")
+decoder_inputs = Input(shape=(30, X_train_tft_decoder.shape[2]), name="decoder_known_future_inputs")
+
+encoder_sequence, encoder_state_h, encoder_state_c = LSTM(units=64, return_sequences=True, return_state=True, dropout=0.20, name="encoder_lstm")(encoder_inputs)
+decoder_sequence = LSTM(units=64, return_sequences=True, dropout=0.20, name="decoder_lstm")(decoder_inputs, initial_state=[encoder_state_h, encoder_state_c])
+
+attention_output = MultiHeadAttention(num_heads=4, key_dim=16, dropout=0.20, name="temporal_cross_attention")(query=decoder_sequence, value=encoder_sequence, key=encoder_sequence)
+x = Add(name="attention_residual")([decoder_sequence, attention_output])
+x = LayerNormalization(name="attention_layer_norm")(x)
+
+feed_forward = TimeDistributed(Dense(64, activation="relu"), name="time_distributed_dense")(x)
+feed_forward = TimeDistributed(Dropout(0.20), name="time_distributed_dropout")(feed_forward)
+x = Add(name="feed_forward_residual")([x, feed_forward])
+x = LayerNormalization(name="feed_forward_layer_norm")(x)
+
+forecast_sequence = TimeDistributed(Dense(1), name="daily_forecast")(x)
+tft_outputs = Reshape((30,), name="thirty_day_forecast")(forecast_sequence)
+
+tft_model = Model(inputs=[encoder_inputs, decoder_inputs], outputs=tft_outputs, name="TFT_Style_Forecaster")
+tft_model.compile(optimizer=Adam(learning_rate=0.001), loss="mse", metrics=["mae"])
+
+tft_checkpoint_path = "best_tft_style_model.keras"
+tft_early_stopping = EarlyStopping(monitor="val_loss", patience=15, min_delta=0.0001, restore_best_weights=True, verbose=1)
+tft_model_checkpoint = ModelCheckpoint(filepath=tft_checkpoint_path, monitor="val_loss", save_best_only=True, verbose=1)
+
+history_tft = tft_model.fit(
+    x=[X_train_tft_encoder, X_train_tft_decoder],
+    y=y_train_scaled,
+    validation_data=([X_val_tft_encoder, X_val_tft_decoder], y_val_scaled),
+    epochs=100,
+    batch_size=32,
+    shuffle=False,
+    callbacks=[tft_early_stopping, tft_model_checkpoint],
+    verbose=1
+)
+
+best_tft_model = tf.keras.models.load_model(tft_checkpoint_path)
+tft_predictions_scaled = best_tft_model.predict([X_test_tft_encoder, X_test_tft_decoder], verbose=1)
+tft_predictions = target_scaler.inverse_transform(tft_predictions_scaled.reshape(-1, 1)).reshape(tft_predictions_scaled.shape)
+tft_actuals = target_scaler.inverse_transform(y_test_scaled.reshape(-1, 1)).reshape(y_test_scaled.shape)
+
+tft_results = {
+    "model": "TFT-Style Forecaster",
+    "MAE": mae(tft_actuals, tft_predictions),
+    "RMSE": rmse(tft_actuals, tft_predictions),
+    "sMAPE": smape(tft_actuals, tft_predictions),
+    "MASE": mase(tft_actuals, tft_predictions, mase_denominator),
+    "Day+1_MAE": mae(tft_actuals[:, 0], tft_predictions[:, 0]),
+    "Day+7_MAE": mae(tft_actuals[:, 6], tft_predictions[:, 6]),
+    "Day+14_MAE": mae(tft_actuals[:, 13], tft_predictions[:, 13]),
+    "Day+21_MAE": mae(tft_actuals[:, 20], tft_predictions[:, 20]),
+    "Day+30_MAE": mae(tft_actuals[:, 29], tft_predictions[:, 29]),
+    "parameter_count": best_tft_model.count_params()
+}
+pd.DataFrame([tft_results]).to_csv("tft_test_results.csv", index=False)
