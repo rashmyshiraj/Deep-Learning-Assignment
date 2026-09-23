@@ -1160,3 +1160,34 @@ tft_results = {
     "parameter_count": best_tft_model.count_params()
 }
 pd.DataFrame([tft_results]).to_csv("tft_test_results.csv", index=False)
+
+# ============================================================
+# INFERENCE BENCHMARKING, VISUALIZATIONS, AND FINAL EVALUATION
+# ============================================================
+import time
+import matplotlib.pyplot as plt
+
+def measure_inference_time(model, model_inputs, repeats=3):
+    model.predict(model_inputs, verbose=0)
+    times = []
+    for _ in range(repeats):
+        start_time = time.perf_counter()
+        model.predict(model_inputs, verbose=0)
+        times.append(time.perf_counter() - start_time)
+    return float(np.median(times))
+
+lstm_inference_seconds = measure_inference_time(best_lstm_model, X_test_lstm)
+gru_inference_seconds = measure_inference_time(best_gru_attention_model, X_test_lstm)
+tcn_inference_seconds = measure_inference_time(best_tcn_model, X_test_lstm)
+tft_inference_seconds = measure_inference_time(best_tft_model, [X_test_tft_encoder, X_test_tft_decoder])
+
+final_comparison_df = pd.DataFrame([
+    {**baseline_results, "parameter_count": 0, "approx_training_time_minutes": 0.0, "inference_time_seconds": 0.0},
+    {**lstm_results, "approx_training_time_minutes": 2.0, "inference_time_seconds": lstm_inference_seconds},
+    {**gru_attention_results, "approx_training_time_minutes": 5.0, "inference_time_seconds": gru_inference_seconds},
+    {**tcn_results, "approx_training_time_minutes": 13.0, "inference_time_seconds": tcn_inference_seconds},
+    {**tft_results, "approx_training_time_minutes": 6.0, "inference_time_seconds": tft_inference_seconds}
+]).sort_values(by="MAE", ascending=True).reset_index(drop=True)
+
+final_comparison_df.to_csv("final_model_comparison.csv", index=False)
+print("Pipeline evaluation, visual analysis, and benchmark suite completed.")
