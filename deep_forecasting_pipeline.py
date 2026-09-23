@@ -988,3 +988,73 @@ gru_attention_results = {
     "parameter_count": best_gru_attention_model.count_params()
 }
 pd.DataFrame([gru_attention_results]).to_csv("gru_attention_test_results.csv", index=False)
+
+
+# ============================================================
+# DILATED RESIDUAL TEMPORAL CONVOLUTIONAL NETWORK (TCN)
+# ============================================================
+from tensorflow.keras.layers import Conv1D, Add, Activation, SpatialDropout1D
+
+def residual_tcn_block(x, filters, kernel_size, dilation_rate, dropout_rate):
+    residual = x
+    x = Conv1D(filters=filters, kernel_size=kernel_size, padding="causal", dilation_rate=dilation_rate, activation=None)(x)
+    x = Activation("relu")(x)
+    x = SpatialDropout1D(dropout_rate)(x)
+
+    x = Conv1D(filters=filters, kernel_size=kernel_size, padding="causal", dilation_rate=dilation_rate, activation=None)(x)
+    x = Activation("relu")(x)
+    x = SpatialDropout1D(dropout_rate)(x)
+
+    if residual.shape[-1] != filters:
+        residual = Conv1D(filters=filters, kernel_size=1, padding="same")(residual)
+
+    x = Add()([x, residual])
+    return Activation("relu")(x)
+
+tcn_inputs = Input(shape=(input_window, X_train_lstm.shape[2]), name="historical_inputs")
+x = tcn_inputs
+for dilation_rate in [1, 2, 4, 8, 16]:
+    x = residual_tcn_block(x=x, filters=32, kernel_size=3, dilation_rate=dilation_rate, dropout_rate=0.10)
+
+x = GlobalAveragePooling1D(name="temporal_pooling")(x)
+x = Dense(64, activation="relu", name="dense_hidden")(x)
+x = Dropout(0.20, name="dropout_hidden")(x)
+tcn_outputs = Dense(forecast_horizon, name="forecast_output")(x)
+
+tcn_model = Model(inputs=tcn_inputs, outputs=tcn_outputs, name="Dilated_Residual_TCN")
+tcn_model.compile(optimizer=Adam(learning_rate=0.001), loss="mse", metrics=["mae"])
+
+tcn_checkpoint_path = "best_tcn_model.keras"
+tcn_early_stopping = EarlyStopping(monitor="val_loss", patience=15, min_delta=0.0001, restore_best_weights=True, verbose=1)
+tcn_model_checkpoint = ModelCheckpoint(filepath=tcn_checkpoint_path, monitor="val_loss", save_best_only=True, verbose=1)
+
+history_tcn = tcn_model.fit(
+    X_train_lstm,
+    y_train_scaled,
+    validation_data=(X_val_lstm, y_val_scaled),
+    epochs=100,
+    batch_size=32,
+    shuffle=False,
+    callbacks=[tcn_early_stopping, tcn_model_checkpoint],
+    verbose=1
+)
+
+best_tcn_model = tf.keras.models.load_model(tcn_checkpoint_path)
+tcn_predictions_scaled = best_tcn_model.predict(X_test_lstm, verbose=1)
+tcn_predictions = target_scaler.inverse_transform(tcn_predictions_scaled.reshape(-1, 1)).reshape(tcn_predictions_scaled.shape)
+tcn_actuals = target_scaler.inverse_transform(y_test_scaled.reshape(-1, 1)).reshape(y_test_scaled.shape)
+
+tcn_results = {
+    "model": "Dilated Residual TCN",
+    "MAE": mae(tcn_actuals, tcn_predictions),
+    "RMSE": rmse(tcn_actuals, tcn_predictions),
+    "sMAPE": smape(tcn_actuals, tcn_predictions),
+    "MASE": mase(tcn_actuals, tcn_predictions, mase_denominator),
+    "Day+1_MAE": mae(tcn_actuals[:, 0], tcn_predictions[:, 0]),
+    "Day+7_MAE": mae(tcn_actuals[:, 6], tcn_predictions[:, 6]),
+    "Day+14_MAE": mae(tcn_actuals[:, 13], tcn_predictions[:, 13]),
+    "Day+21_MAE": mae(tcn_actuals[:, 20], tcn_predictions[:, 20]),
+    "Day+30_MAE": mae(tcn_actuals[:, 29], tcn_predictions[:, 29]),
+    "parameter_count": best_tcn_model.count_params()
+}
+pd.DataFrame([tcn_results]).to_csv("tcn_test_results.csv", index=False)
