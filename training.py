@@ -933,3 +933,1216 @@ for metric, values in metrics.items():
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+# %%
+print("=== TARGET SCALER ===")
+print("Mean:", target_scaler.mean_)
+print("Scale:", target_scaler.scale_)
+
+print("\n=== FIRST 10 SCALED PREDICTIONS ===")
+print(y_pred_lstm_scaled[0][:10])
+
+print("\n=== FIRST 10 INVERSE-TRANSFORMED PREDICTIONS ===")
+print(y_pred_lstm[0][:10])
+
+print("\n=== FIRST 10 ACTUAL VALUES ===")
+print(y_test_actual[0][:10])
+
+# Manual check of the first prediction
+manual_value = (
+    y_pred_lstm_scaled[0][0] * target_scaler.scale_[0]
+    + target_scaler.mean_[0]
+)
+
+print("\n=== MANUAL CHECK ===")
+print("Scaled prediction:", y_pred_lstm_scaled[0][0])
+print("Inverse transformed:", y_pred_lstm[0][0])
+print("Manual calculation:", manual_value)
+
+# %%
+import numpy as np
+
+print("=== FIRST 30-DAY FORECAST ===")
+
+print("\nActual:")
+print(y_test_actual[0])
+
+print("\nLSTM:")
+print(y_pred_lstm[0])
+
+print("\nStandard deviation:")
+print("Actual:", np.std(y_test_actual[0]))
+print("LSTM:  ", np.std(y_pred_lstm[0]))
+
+print("\nRange:")
+print("Actual:", np.min(y_test_actual[0]), "to", np.max(y_test_actual[0]))
+print("LSTM:  ", np.min(y_pred_lstm[0]), "to", np.max(y_pred_lstm[0]))
+
+# %%
+import numpy as np
+
+# Log-transform the original target values
+y_train_log = np.log1p(y_train)
+y_val_log = np.log1p(y_val)
+y_test_log = np.log1p(y_test)
+
+print("Original target:")
+print(y_train[:5, 0])
+
+print("\nLog-transformed target:")
+print(y_train_log[:5, 0])
+
+# %%
+from sklearn.preprocessing import StandardScaler
+
+log_target_scaler = StandardScaler()
+
+y_train_log_scaled = log_target_scaler.fit_transform(
+    y_train_log.reshape(-1, 1)
+).reshape(y_train_log.shape)
+
+y_val_log_scaled = log_target_scaler.transform(
+    y_val_log.reshape(-1, 1)
+).reshape(y_val_log.shape)
+
+y_test_log_scaled = log_target_scaler.transform(
+    y_test_log.reshape(-1, 1)
+).reshape(y_test_log.shape)
+
+print("Train:", y_train_log_scaled.shape)
+print("Validation:", y_val_log_scaled.shape)
+print("Test:", y_test_log_scaled.shape)
+
+print("\nTraining mean:", y_train_log_scaled.mean())
+print("Training std:", y_train_log_scaled.std())
+
+# %%
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.random.set_seed(42)
+
+lstm_log_model = Sequential([
+    LSTM(64, return_sequences=True, input_shape=(90, 109)),
+    Dropout(0.2),
+
+    LSTM(32, return_sequences=False),
+
+    Dense(64, activation="relu"),
+    Dropout(0.2),
+
+    Dense(30)
+])
+
+lstm_log_model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    loss="mse",
+    metrics=["mae"]
+)
+
+early_stopping_log = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_lstm_log = lstm_log_model.fit(
+    X_train,
+    y_train_log_scaled,
+    validation_data=(X_val, y_val_log_scaled),
+    epochs=100,
+    batch_size=32,
+    callbacks=[early_stopping_log],
+    verbose=1
+)
+
+# %%
+# Predict on test data
+y_pred_lstm_log_scaled = lstm_log_model.predict(
+    X_test,
+    verbose=1
+)
+
+# Convert scaled predictions back to log(arrivals)
+y_pred_lstm_log = log_target_scaler.inverse_transform(
+    y_pred_lstm_log_scaled.reshape(-1, 1)
+).reshape(y_pred_lstm_log_scaled.shape)
+
+# Convert log(arrivals) back to actual arrivals
+y_pred_lstm_log = np.expm1(y_pred_lstm_log)
+
+# Make sure predictions cannot be negative
+y_pred_lstm_log = np.maximum(y_pred_lstm_log, 0)
+
+print("Prediction shape:", y_pred_lstm_log.shape)
+
+print("\nFirst 10 predictions:")
+print(y_pred_lstm_log[0][:10])
+
+print("\nFirst 10 actual values:")
+print(y_test_actual[0][:10])
+
+print("\nStandard deviation:")
+print("Actual:", np.std(y_test_actual[0]))
+print("Log-LSTM:", np.std(y_pred_lstm_log[0]))
+
+print("\nRange:")
+print(
+    "Actual:",
+    np.min(y_test_actual[0]),
+    "to",
+    np.max(y_test_actual[0])
+)
+
+print(
+    "Log-LSTM:",
+    np.min(y_pred_lstm_log[0]),
+    "to",
+    np.max(y_pred_lstm_log[0])
+)
+
+# %%
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import numpy as np
+
+y_true = y_test_actual.flatten()
+y_pred = y_pred_lstm_log.flatten()
+
+mae_log = mean_absolute_error(y_true, y_pred)
+
+rmse_log = np.sqrt(
+    mean_squared_error(y_true, y_pred)
+)
+
+smape_log = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+# Same MASE calculation used for the original models
+train_arrivals = train_df["arrivals"].values
+
+naive_errors = np.abs(
+    train_arrivals[1:] - train_arrivals[:-1]
+)
+
+mase_scale = np.mean(naive_errors)
+
+mase_log = np.mean(
+    np.abs(y_true - y_pred)
+) / mase_scale
+
+print("Log-LSTM Test Results")
+print("---------------------")
+print(f"MAE:   {mae_log:.2f}")
+print(f"RMSE:  {rmse_log:.2f}")
+print(f"sMAPE: {smape_log:.2f}%")
+print(f"MASE:  {mase_log:.4f}")
+
+# %%
+import matplotlib.pyplot as plt
+
+forecast_dates = target_dates[test_mask.values][:30]
+
+plt.figure(figsize=(13, 6))
+
+plt.plot(
+    forecast_dates,
+    y_test_actual[0],
+    label="Actual",
+    linewidth=3
+)
+
+plt.plot(
+    forecast_dates,
+    y_pred_lstm[0],
+    label="Original LSTM",
+    linewidth=2
+)
+
+plt.plot(
+    forecast_dates,
+    y_pred_lstm_log[0],
+    label="Log-LSTM",
+    linewidth=2
+)
+
+plt.title("Actual vs Predicted Tourist Arrivals — First 30-Day Test Forecast")
+plt.xlabel("Date")
+plt.ylabel("Tourist Arrivals")
+plt.xticks(rotation=45)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# %%
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.random.set_seed(42)
+
+lstm_tuned = Sequential([
+    LSTM(128, return_sequences=True, input_shape=(90, 109)),
+    Dropout(0.1),
+
+    LSTM(64, return_sequences=False),
+    Dense(64, activation="relu"),
+    Dropout(0.1),
+
+    Dense(30)
+])
+
+lstm_tuned.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+    loss="mse",
+    metrics=["mae"]
+)
+
+early_stopping_tuned = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_lstm_tuned = lstm_tuned.fit(
+    X_train,
+    y_train_scaled,
+    validation_data=(X_val, y_val_scaled),
+    epochs=100,
+    batch_size=16,
+    callbacks=[early_stopping_tuned],
+    verbose=1
+)
+
+# %%
+y_pred_tuned_scaled = lstm_tuned.predict(X_test, verbose=1)
+
+y_pred_tuned = target_scaler.inverse_transform(
+    y_pred_tuned_scaled.reshape(-1, 1)
+).reshape(y_pred_tuned_scaled.shape)
+
+y_pred_tuned = np.maximum(y_pred_tuned, 0)
+
+y_true = y_test_actual.flatten()
+y_pred = y_pred_tuned.flatten()
+
+mae = mean_absolute_error(y_true, y_pred)
+
+rmse = np.sqrt(
+    mean_squared_error(y_true, y_pred)
+)
+
+smape = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+mase = np.mean(
+    np.abs(y_true - y_pred)
+) / mase_scale
+
+print("Tuned LSTM Test Results")
+print("-----------------------")
+print(f"MAE:   {mae:.2f}")
+print(f"RMSE:  {rmse:.2f}")
+print(f"sMAPE: {smape:.2f}%")
+print(f"MASE:  {mase:.4f}")
+
+print("\nFirst 30-day standard deviation:")
+print("Actual:", np.std(y_test_actual[0]))
+print("Tuned LSTM:", np.std(y_pred_tuned[0]))
+
+print("\nFirst 30-day range:")
+print("Actual:", np.min(y_test_actual[0]), "to", np.max(y_test_actual[0]))
+print("Tuned LSTM:", np.min(y_pred_tuned[0]), "to", np.max(y_pred_tuned[0]))
+
+# %%
+# ============================================
+# STEP 1: CREATE EXPLICIT TREND FEATURES
+# ============================================
+
+df_trend = df.copy()
+
+# Make sure sorted
+df_trend["date"] = pd.to_datetime(df_trend["date"])
+df_trend = df_trend.sort_values("date").reset_index(drop=True)
+
+# Rolling statistics of arrivals
+df_trend["arrivals_roll_30"] = (
+    df_trend["arrivals"]
+    .rolling(window=30, min_periods=1)
+    .mean()
+)
+
+df_trend["arrivals_roll_90"] = (
+    df_trend["arrivals"]
+    .rolling(window=90, min_periods=1)
+    .mean()
+)
+
+df_trend["arrivals_roll_365"] = (
+    df_trend["arrivals"]
+    .rolling(window=365, min_periods=1)
+    .mean()
+)
+
+# Rolling volatility
+df_trend["arrivals_std_90"] = (
+    df_trend["arrivals"]
+    .rolling(window=90, min_periods=1)
+    .std()
+)
+
+# Year-over-year growth
+df_trend["arrivals_yoy"] = (
+    df_trend["arrivals"]
+    .pct_change(periods=365)
+)
+
+# Simple time trend
+df_trend["time_index"] = np.arange(len(df_trend))
+
+# Replace infinities and initial NaNs
+df_trend = df_trend.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+df_trend = df_trend.fillna(0)
+
+print("Original columns:", len(df.columns))
+print("New columns:", len(df_trend.columns))
+
+print("\nNew trend features:")
+print([
+    "arrivals_roll_30",
+    "arrivals_roll_90",
+    "arrivals_roll_365",
+    "arrivals_std_90",
+    "arrivals_yoy",
+    "time_index"
+])
+
+# %%
+print(
+    df_trend[
+        [
+            "date",
+            "arrivals",
+            "arrivals_roll_30",
+            "arrivals_roll_90",
+            "arrivals_roll_365",
+            "arrivals_std_90",
+            "arrivals_yoy",
+            "time_index"
+        ]
+    ].tail(10)
+)
+
+# %%
+# ============================================
+# STEP 2: BUILD TREND-ENHANCED SEQUENCES
+# ============================================
+
+trend_features = [
+    "arrivals_roll_30",
+    "arrivals_roll_90",
+    "arrivals_roll_365",
+    "arrivals_std_90",
+    "arrivals_yoy",
+    "time_index"
+]
+
+# Keep ALL original model features + new trend features
+trend_model_features = [
+    col for col in df_trend.columns
+    if col != "date"
+]
+
+target_col = "arrivals"
+target_index_trend = trend_model_features.index(target_col)
+
+print("Total model features:", len(trend_model_features))
+print("Target index:", target_index_trend)
+
+# %%
+# Convert to numpy
+trend_data = df_trend[
+    trend_model_features
+].values.astype(np.float32)
+
+# Create sequences
+X_trend, y_trend = create_sequences(
+    trend_data,
+    target_index_trend,
+    LOOKBACK,
+    HORIZON
+)
+
+print("X_trend:", X_trend.shape)
+print("y_trend:", y_trend.shape)
+
+# %%
+# ============================================
+# CHRONOLOGICAL SPLIT
+# ============================================
+
+target_dates_trend = df_trend["date"].iloc[
+    LOOKBACK : LOOKBACK + len(y_trend)
+].reset_index(drop=True)
+
+train_mask_trend = (
+    target_dates_trend < "2024-01-01"
+)
+
+val_mask_trend = (
+    (target_dates_trend >= "2024-01-01") &
+    (target_dates_trend < "2025-01-01")
+)
+
+test_mask_trend = (
+    target_dates_trend >= "2025-01-01"
+)
+
+X_train_trend = X_trend[train_mask_trend.values]
+y_train_trend = y_trend[train_mask_trend.values]
+
+X_val_trend = X_trend[val_mask_trend.values]
+y_val_trend = y_trend[val_mask_trend.values]
+
+X_test_trend = X_trend[test_mask_trend.values]
+y_test_trend = y_trend[test_mask_trend.values]
+
+print("X_train:", X_train_trend.shape)
+print("X_val:", X_val_trend.shape)
+print("X_test:", X_test_trend.shape)
+
+print("y_train:", y_train_trend.shape)
+print("y_val:", y_val_trend.shape)
+print("y_test:", y_test_trend.shape)
+
+# %%
+from sklearn.preprocessing import StandardScaler
+
+n_features_trend = X_train_trend.shape[2]
+
+trend_scaler = StandardScaler()
+
+trend_scaler.fit(
+    X_train_trend.reshape(-1, n_features_trend)
+)
+
+X_train_trend = trend_scaler.transform(
+    X_train_trend.reshape(-1, n_features_trend)
+).reshape(X_train_trend.shape)
+
+X_val_trend = trend_scaler.transform(
+    X_val_trend.reshape(-1, n_features_trend)
+).reshape(X_val_trend.shape)
+
+X_test_trend = trend_scaler.transform(
+    X_test_trend.reshape(-1, n_features_trend)
+).reshape(X_test_trend.shape)
+
+# %%
+trend_target_scaler = StandardScaler()
+
+y_train_trend_scaled = trend_target_scaler.fit_transform(
+    y_train_trend.reshape(-1, 1)
+).reshape(y_train_trend.shape)
+
+y_val_trend_scaled = trend_target_scaler.transform(
+    y_val_trend.reshape(-1, 1)
+).reshape(y_val_trend.shape)
+
+y_test_trend_scaled = trend_target_scaler.transform(
+    y_test_trend.reshape(-1, 1)
+).reshape(y_test_trend.shape)
+
+print("X_train:", X_train_trend.shape)
+print("X_val:", X_val_trend.shape)
+print("X_test:", X_test_trend.shape)
+
+print("y_train:", y_train_trend_scaled.shape)
+print("y_val:", y_val_trend_scaled.shape)
+print("y_test:", y_test_trend_scaled.shape)
+
+# %%
+
+
+# %%
+# ============================================
+# STEP 5: TEST THE TREND-ENHANCED LSTM
+# ============================================
+
+y_pred_trend_scaled = lstm_trend.predict(
+    X_test_trend,
+    verbose=1
+)
+
+# Convert predictions back to original arrivals
+y_pred_trend = trend_target_scaler.inverse_transform(
+    y_pred_trend_scaled.reshape(-1, 1)
+).reshape(y_pred_trend_scaled.shape)
+
+# Actual values
+y_test_trend_actual = trend_target_scaler.inverse_transform(
+    y_test_trend_scaled.reshape(-1, 1)
+).reshape(y_test_trend_scaled.shape)
+
+# Prevent negative predictions
+y_pred_trend = np.maximum(y_pred_trend, 0)
+
+# Flatten
+y_true_trend = y_test_trend_actual.flatten()
+y_pred_trend_flat = y_pred_trend.flatten()
+
+# Metrics
+mae_trend = mean_absolute_error(
+    y_true_trend,
+    y_pred_trend_flat
+)
+
+rmse_trend = np.sqrt(
+    mean_squared_error(
+        y_true_trend,
+        y_pred_trend_flat
+    )
+)
+
+smape_trend = np.mean(
+    2 * np.abs(y_pred_trend_flat - y_true_trend) /
+    (np.abs(y_true_trend) + np.abs(y_pred_trend_flat) + 1e-8)
+) * 100
+
+mase_trend = (
+    np.mean(np.abs(y_true_trend - y_pred_trend_flat))
+    / mase_scale
+)
+
+print("=== TREND-ENHANCED LSTM TEST RESULTS ===")
+print(f"MAE:   {mae_trend:.2f}")
+print(f"RMSE:  {rmse_trend:.2f}")
+print(f"sMAPE: {smape_trend:.2f}%")
+print(f"MASE:  {mase_trend:.4f}")
+
+print("\n=== FIRST 30-DAY FORECAST ===")
+print("\nActual:")
+print(y_test_trend_actual[0])
+
+print("\nTrend LSTM:")
+print(y_pred_trend[0])
+
+print("\n=== VARIANCE ===")
+print("Actual SD:", np.std(y_test_trend_actual[0]))
+print("Trend LSTM SD:", np.std(y_pred_trend[0]))
+
+print("\n=== RANGE ===")
+print(
+    "Actual:",
+    np.min(y_test_trend_actual[0]),
+    "to",
+    np.max(y_test_trend_actual[0])
+)
+
+print(
+    "Trend LSTM:",
+    np.min(y_pred_trend[0]),
+    "to",
+    np.max(y_pred_trend[0])
+)
+
+# %%
+from statsmodels.tsa.seasonal import STL
+import numpy as np
+import pandas as pd
+
+# %%
+# Training-period arrivals only
+train_arrivals_stl = train_df["arrivals"].values.astype(float)
+
+print("Training observations:", len(train_arrivals_stl))
+print("First:", train_arrivals_stl[:5])
+print("Last:", train_arrivals_stl[-5:])
+
+# %%
+stl = STL(
+    train_arrivals_stl,
+    period=365,
+    robust=True
+)
+
+stl_result = stl.fit()
+
+stl_trend = stl_result.trend
+stl_seasonal = stl_result.seasonal
+stl_residual = stl_result.resid
+
+print("Trend shape:", stl_trend.shape)
+print("Seasonal shape:", stl_seasonal.shape)
+print("Residual shape:", stl_residual.shape)
+
+print("\nFirst 5 trend values:")
+print(stl_trend[:5])
+
+print("\nFirst 5 seasonal values:")
+print(stl_seasonal[:5])
+
+print("\nFirst 5 residual values:")
+print(stl_residual[:5])
+
+# %%
+print("=== STL SUMMARY ===")
+
+print("Original mean:", np.mean(train_arrivals_stl))
+print("Trend mean:", np.mean(stl_trend))
+print("Seasonal mean:", np.mean(stl_seasonal))
+print("Residual mean:", np.mean(stl_residual))
+
+print("\nStandard deviations:")
+print("Original:", np.std(train_arrivals_stl))
+print("Trend:", np.std(stl_trend))
+print("Seasonal:", np.std(stl_seasonal))
+print("Residual:", np.std(stl_residual))
+
+# %%
+reconstructed = (
+    stl_trend +
+    stl_seasonal +
+    stl_residual
+)
+
+reconstruction_error = np.max(
+    np.abs(train_arrivals_stl - reconstructed)
+)
+
+print("Maximum reconstruction error:", reconstruction_error)
+
+# %%
+# ============================================
+# STEP 6: STL RESIDUAL TARGET
+# ============================================
+
+# Residual component from training STL
+residual_train = stl_residual.astype(np.float32)
+
+print("Residual shape:", residual_train.shape)
+print("Residual mean:", np.mean(residual_train))
+print("Residual std:", np.std(residual_train))
+
+# %%
+def create_target_sequences(
+    target,
+    lookback=90,
+    horizon=30
+):
+    y = []
+
+    for i in range(
+        lookback,
+        len(target) - horizon + 1
+    ):
+        y.append(
+            target[i:i+horizon]
+        )
+
+    return np.array(y)
+
+
+y_residual = create_target_sequences(
+    residual_train,
+    LOOKBACK,
+    HORIZON
+)
+
+print("Residual target shape:", y_residual.shape)
+
+# %%
+# ============================================
+# ALIGN STL RESIDUAL TARGET WITH X_train
+# ============================================
+
+# The original training samples correspond to target dates
+# before 2024-01-01.
+
+residual_target_dates = train_df["date"].iloc[
+    LOOKBACK : LOOKBACK + len(y_residual)
+].reset_index(drop=True)
+
+residual_train_mask = (
+    residual_target_dates < "2024-01-01"
+)
+
+y_residual_train = y_residual[
+    residual_train_mask.values
+]
+
+print("Residual training target shape:",
+      y_residual_train.shape)
+
+print("Original X_train shape:",
+      X_train.shape)
+
+# %%
+# ============================================
+# ALIGN INPUTS WITH STL RESIDUAL TARGET
+# ============================================
+
+X_residual_train = X_train[:len(y_residual_train)]
+
+print("X residual train:", X_residual_train.shape)
+print("y residual train:", y_residual_train.shape)
+
+# %%
+from sklearn.preprocessing import StandardScaler
+
+residual_scaler = StandardScaler()
+
+y_residual_train_scaled = residual_scaler.fit_transform(
+    y_residual_train.reshape(-1, 1)
+).reshape(y_residual_train.shape)
+
+print(
+    "Residual scaled shape:",
+    y_residual_train_scaled.shape
+)
+
+print(
+    "Scaled mean:",
+    y_residual_train_scaled.mean()
+)
+
+print(
+    "Scaled std:",
+    y_residual_train_scaled.std()
+)
+
+# %%
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.random.set_seed(42)
+
+stl_residual_lstm = Sequential([
+    LSTM(
+        64,
+        return_sequences=True,
+        input_shape=(90, 109)
+    ),
+    Dropout(0.2),
+
+    LSTM(
+        32,
+        return_sequences=False
+    ),
+
+    Dense(64, activation="relu"),
+    Dropout(0.2),
+
+    Dense(30)
+])
+
+stl_residual_lstm.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.001
+    ),
+    loss="mse",
+    metrics=["mae"]
+)
+
+early_stopping_stl = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_stl_residual = stl_residual_lstm.fit(
+    X_residual_train,
+    y_residual_train_scaled,
+    validation_split=0.1,
+    epochs=100,
+    batch_size=32,
+    callbacks=[early_stopping_stl],
+    verbose=1
+)
+
+# %%
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ============================================
+# MODELS WITH AVAILABLE PREDICTION ARRAYS
+# ============================================
+
+model_predictions = {
+    "LSTM": y_pred_lstm,
+    "Log-LSTM": y_pred_lstm_log,
+    "Trend LSTM": y_pred_trend,
+    "TCN": y_pred_tcn,
+    "Transformer": y_pred_transformer,
+    "N-BEATS": y_pred_nbeats
+}
+
+# ============================================
+# BUILD DATE-ALIGNED TIMELINE
+# ============================================
+
+rows = []
+
+test_indices = np.where(test_mask.values)[0]
+
+for i in range(len(y_test_actual)):
+
+    start_idx = test_indices[i] + LOOKBACK
+
+    dates_i = df["date"].iloc[
+        start_idx:start_idx + HORIZON
+    ].values
+
+    for j in range(HORIZON):
+
+        row = {
+            "date": dates_i[j],
+            "actual": y_test_actual[i, j]
+        }
+
+        for model_name, predictions in model_predictions.items():
+            row[model_name] = predictions[i, j]
+
+        rows.append(row)
+
+full_predictions = pd.DataFrame(rows)
+
+full_predictions["date"] = pd.to_datetime(
+    full_predictions["date"]
+)
+
+# ============================================
+# ONE VALUE PER CALENDAR DATE
+# ============================================
+
+timeline = (
+    full_predictions
+    .groupby("date")
+    .mean(numeric_only=True)
+    .reset_index()
+    .sort_values("date")
+)
+
+print("Timeline created successfully")
+print("Shape:", timeline.shape)
+print("Start:", timeline["date"].min())
+print("End:", timeline["date"].max())
+
+# ============================================
+# PLOT EACH MODEL
+# ============================================
+
+for model in model_predictions.keys():
+
+    plt.figure(figsize=(18, 6))
+
+    plt.plot(
+        timeline["date"],
+        timeline["actual"],
+        label="Actual",
+        linewidth=2
+    )
+
+    plt.plot(
+        timeline["date"],
+        timeline[model],
+        label=model,
+        linewidth=1.5
+    )
+
+    plt.title(
+        f"{model}: Actual vs Predicted Tourist Arrivals "
+        "(2025–2026)"
+    )
+
+    plt.xlabel("Date")
+    plt.ylabel("Tourist Arrivals")
+
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.xticks(rotation=45)
+
+    plt.tight_layout()
+    plt.show()
+
+# %%
+import tensorflow as tf
+
+from tensorflow.keras.layers import (
+    Input,
+    LSTM,
+    Dense,
+    Dropout,
+    Attention,
+    LayerNormalization
+)
+
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping
+
+tf.random.set_seed(42)
+
+# ============================================
+# LSTM + TEMPORAL ATTENTION
+# ============================================
+
+inputs = Input(shape=(90, 109))
+
+# Encoder
+encoder = LSTM(
+    64,
+    return_sequences=True,
+    return_state=True
+)
+
+encoder_outputs, state_h, state_c = encoder(inputs)
+
+# Temporal self-attention
+attention_output = Attention()([
+    encoder_outputs,
+    encoder_outputs
+])
+
+# Residual connection
+attention_output = LayerNormalization()(
+    encoder_outputs + attention_output
+)
+
+# Compress attended sequence
+context = LSTM(
+    32,
+    return_sequences=False
+)(attention_output)
+
+# Regression head
+x = Dense(
+    64,
+    activation="relu"
+)(context)
+
+x = Dropout(0.2)(x)
+
+outputs = Dense(30)(x)
+
+attention_lstm = Model(
+    inputs=inputs,
+    outputs=outputs
+)
+
+attention_lstm.compile(
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.001
+    ),
+    loss="mse",
+    metrics=["mae"]
+)
+
+attention_lstm.summary()
+
+# %%
+early_stopping_attention = EarlyStopping(
+    monitor="val_loss",
+    patience=10,
+    restore_best_weights=True
+)
+
+history_attention_lstm = attention_lstm.fit(
+    X_train,
+    y_train_scaled,
+    validation_data=(X_val, y_val_scaled),
+    epochs=100,
+    batch_size=32,
+    callbacks=[early_stopping_attention],
+    verbose=1
+)
+
+# %%
+import numpy as np
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# ============================================
+# ATTENTION LSTM — TEST PREDICTIONS
+# ============================================
+
+y_pred_attention_scaled = attention_lstm.predict(
+    X_test,
+    verbose=1
+)
+
+# Convert back to original arrivals scale
+y_pred_attention = target_scaler.inverse_transform(
+    y_pred_attention_scaled.reshape(-1, 1)
+).reshape(y_pred_attention_scaled.shape)
+
+# Actual test values
+y_test_attention_actual = target_scaler.inverse_transform(
+    y_test_scaled.reshape(-1, 1)
+).reshape(y_test_scaled.shape)
+
+# Prevent negative arrival predictions
+y_pred_attention = np.maximum(
+    y_pred_attention,
+    0
+)
+
+print("Prediction shape:", y_pred_attention.shape)
+
+# ============================================
+# METRICS
+# ============================================
+
+y_true = y_test_attention_actual.flatten()
+y_pred = y_pred_attention.flatten()
+
+mae_attention = mean_absolute_error(
+    y_true,
+    y_pred
+)
+
+rmse_attention = np.sqrt(
+    mean_squared_error(
+        y_true,
+        y_pred
+    )
+)
+
+smape_attention = np.mean(
+    2 * np.abs(y_pred - y_true) /
+    (np.abs(y_true) + np.abs(y_pred) + 1e-8)
+) * 100
+
+# Same MASE calculation used for previous models
+train_arrivals = train_df["arrivals"].values
+
+naive_errors = np.abs(
+    train_arrivals[1:] -
+    train_arrivals[:-1]
+)
+
+mase_scale = np.mean(
+    naive_errors
+)
+
+mase_attention = (
+    np.mean(np.abs(y_true - y_pred))
+    / mase_scale
+)
+
+print("\n=== ATTENTION LSTM TEST RESULTS ===")
+print(f"MAE:   {mae_attention:.2f}")
+print(f"RMSE:  {rmse_attention:.2f}")
+print(f"sMAPE: {smape_attention:.2f}%")
+print(f"MASE:  {mase_attention:.4f}")
+
+# ============================================
+# VARIANCE CHECK
+# ============================================
+
+print("\n=== FIRST 30-DAY FORECAST ===")
+
+print("\nActual:")
+print(y_test_attention_actual[0])
+
+print("\nAttention LSTM:")
+print(y_pred_attention[0])
+
+print("\nStandard deviation:")
+print("Actual:          ", np.std(y_test_attention_actual[0]))
+print("Attention LSTM:  ", np.std(y_pred_attention[0]))
+
+print("\nRange:")
+print(
+    "Actual:",
+    np.min(y_test_attention_actual[0]),
+    "to",
+    np.max(y_test_attention_actual[0])
+)
+
+print(
+    "Attention LSTM:",
+    np.min(y_pred_attention[0]),
+    "to",
+    np.max(y_pred_attention[0])
+)
+
+# %%
+import numpy as np
+
+# ============================================
+# 7-DAY SEASONAL MASE
+# ============================================
+
+# Training arrivals
+train_arrivals = train_df["arrivals"].values.astype(float)
+
+# Seasonal naive benchmark:
+# prediction for day t = arrivals from 7 days earlier
+seasonal_errors = np.abs(
+    train_arrivals[7:] -
+    train_arrivals[:-7]
+)
+
+mase_scale_7 = np.mean(seasonal_errors)
+
+print("7-day seasonal naive MAE scale:",
+      mase_scale_7)
+
+# ============================================
+# CALCULATE MASE FOR EACH MODEL
+# ============================================
+
+predictions = {
+    "LSTM": y_pred_lstm,
+    "Log-LSTM": y_pred_lstm_log,
+    "Tuned LSTM": y_pred_lstm_tuned if "y_pred_lstm_tuned" in globals() else None,
+    "Trend LSTM": y_pred_trend,
+    "TCN": y_pred_tcn,
+    "Transformer": y_pred_transformer,
+    "N-BEATS": y_pred_nbeats,
+    "Attention LSTM": y_pred_attention
+}
+
+mase_results = {}
+
+y_true = y_test_actual.flatten()
+
+for model, pred in predictions.items():
+
+    if pred is None:
+        continue
+
+    y_pred = pred.flatten()
+
+    mase_results[model] = (
+        np.mean(np.abs(y_true - y_pred))
+        / mase_scale_7
+    )
+
+# ============================================
+# DISPLAY
+# ============================================
+
+print("\n=== 7-DAY SEASONAL MASE ===")
+
+for model, value in mase_results.items():
+    print(f"{model:20s}: {value:.4f}")
+
+# %%
+
+
+
