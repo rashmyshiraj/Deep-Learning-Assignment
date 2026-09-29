@@ -1,0 +1,48 @@
+{
+  "project": "Sri Lanka Tourist Arrivals Forecasting Using Deep Learning",
+  "seed": 42,
+  "common": {
+    "lookback_days": 90,
+    "forecast_horizon_days": 30,
+    "train_end": "2023-12-31",
+    "validation_start": "2024-01-01",
+    "validation_end": "2024-12-31",
+    "test_start": "2025-01-01",
+    "main_loss": "mse",
+    "main_optimizer": "Adam"
+  },
+  "experiments": {
+    "experiment_1_preliminary": {
+      "script": "training.py",
+      "models": ["LSTM", "TCN", "Transformer", "N-BEATS-style"],
+      "input_features": 109,
+      "status": "preliminary/development experiment",
+      "seed": 42
+    },
+    "primary_controlled": {
+      "script": "deep_forecasting_pipeline.py",
+      "models": ["Seasonal Naive (7-day)", "LSTM", "GRU + Temporal Attention", "Dilated Residual TCN", "TFT-style forecaster"],
+      "exogenous_features": 105,
+      "historical_neural_input_features": 106,
+      "historical_features": 25,
+      "known_future_features": 80,
+      "batch_size": 32,
+      "max_epochs": 100,
+      "learning_rate": 0.001,
+      "shuffle": false,
+      "early_stopping_patience": 15,
+      "seed": 42
+    },
+    "experiment_3_crisis_adjusted": {
+      "script": "ahamedtraining.py",
+      "models": ["LSTM", "TCN", "Transformer", "N-BEATS-style"],
+      "excluded_period_start": "2020-01-01",
+      "excluded_period_end": "2022-12-31",
+      "input_features": 114,
+      "train_windows": 3716,
+      "validation_windows": 337,
+      "test_windows": 548,
+      "seed": 42
+    }
+  }
+}
